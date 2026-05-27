@@ -436,17 +436,33 @@ def run_vod(video_path_or_url: str, title: Optional[str] = None) -> None:
     )
 
 
+def _kill_stale_overlay_procs() -> None:
+    """Kill any zombie overlay processes from previous crashes. macOS leaves
+    them around when Python crashes uncleanly and they hold stdin handles
+    that confuse new launches."""
+    import subprocess as _sp
+    try:
+        _sp.run(["pkill", "-f", "python -m ui.overlay"], stderr=_sp.DEVNULL, stdout=_sp.DEVNULL)
+    except Exception:
+        pass
+
+
 def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
     """Spawn the pywebview overlay as a child process. stdin receives JSON
     snapshots; stdout emits SNAP_CONTROL:* lines we forward to the worker.
 
     stderr is written to data/sessions/.overlay.log so silent failures are
-    debuggable. We also log immediately if Popen fails."""
+    debuggable. We also log immediately if Popen fails. Stale overlays from
+    earlier crashes are killed first."""
     import subprocess
     import sys as _sys
+    _kill_stale_overlay_procs()
     log_path = config.SESSIONS_DIR / ".overlay.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Append a session-start marker so we can correlate logs to runs.
+        with log_path.open("ab") as f:
+            f.write(b"\n--- overlay spawn ---\n")
         stderr_f = log_path.open("ab")
         proc = subprocess.Popen(
             [_sys.executable, "-m", "ui.overlay"],
