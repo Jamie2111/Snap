@@ -169,7 +169,10 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
 
 def aggregate(matches_stats: list[MatchStats]) -> MatchStats:
     """Roll multiple per-match MatchStats into one session-level rollup.
-    Averages each named stat across matches."""
+    Averages each named stat across matches. Critically, preserves the
+    sample_size + enough_data fields so a session-wide rollup of "0 uses
+    in 4 minutes" still shows as 'not enough data', NOT as -100% below
+    benchmark."""
 
     if not matches_stats:
         return MatchStats(hero=None, duration_seconds=0)
@@ -178,7 +181,6 @@ def aggregate(matches_stats: list[MatchStats]) -> MatchStats:
     total_seconds = sum(m.duration_seconds for m in matches_stats)
     out = MatchStats(hero=primary_hero, duration_seconds=total_seconds)
 
-    # Gather all unique stat labels
     by_label: dict[str, list[StatLine]] = {}
     for m in matches_stats:
         for sl in m.stats:
@@ -190,6 +192,13 @@ def aggregate(matches_stats: list[MatchStats]) -> MatchStats:
             continue
         first = lines[0]
         avg = sum(values) / len(values)
+        sample_sum = sum(sl.sample_size for sl in lines)
+        # Aggregate enough_data: True only if at least one match had enough
+        # data AND the rolled-up total seconds clear the threshold.
+        any_enough = any(sl.enough_data for sl in lines)
+        # Conservative rollup: only mark enough_data=True if total session
+        # time + total samples clear conservative aggregate thresholds.
+        rollup_enough = any_enough and sample_sum > 0 and total_seconds >= MIN_DURATION_FOR_ABILITY_BENCH
         out.stats.append(StatLine(
             label=label,
             value=round(avg, 2),
@@ -197,6 +206,8 @@ def aggregate(matches_stats: list[MatchStats]) -> MatchStats:
             benchmark=first.benchmark,
             tier=first.tier,
             lower_is_better=first.lower_is_better,
+            sample_size=sample_sum,
+            enough_data=rollup_enough,
         ))
 
     return out

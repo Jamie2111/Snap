@@ -47,25 +47,76 @@ def tip_for_dying(
     hero: Optional[str],
     last_death=None,  # PlayerDeath dataclass or None
 ) -> Optional[RealtimeTip]:
-    """During the death screen: root-cause of this specific death."""
+    """During the death screen: hero-specific root-cause of this death."""
+    from knowledge.hero_stats import HERO_ABILITY_LABELS
+
     if last_death is None:
+        # No death-state info; lean on hero positioning instead of generic reset
+        if hero and hero in HERO_COACHING:
+            mistakes = HERO_COACHING[hero].get("positioning", {}).get("common_positioning_mistakes", [])
+            if mistakes:
+                return RealtimeTip(state=PlayerState.DYING, text="Reset.",
+                                   detail=f"Common {hero.title()} death cause: {mistakes[0].lower()}")
         return RealtimeTip(state=PlayerState.DYING, text="Reset.", detail="Take the long way back.")
+
     if last_death.ult_pct_at_death >= 0.80:
         pct = int(last_death.ult_pct_at_death * 100)
+        # Pull hero-specific ult advice from HERO_COACHING when available.
+        detail = "Next life: use it earlier or before you commit."
+        if hero:
+            ult_key = HERO_ABILITY_LABELS.get(hero, {}).get("ult")
+            if ult_key:
+                ability = HERO_COACHING.get(hero, {}).get("abilities", {}).get(ult_key, {})
+                tmpl = ability.get("feedback_templates", {}).get("died_holding")
+                if tmpl:
+                    try:
+                        detail = tmpl.format(pct=last_death.ult_pct_at_death, duration=0)
+                    except Exception:
+                        detail = tmpl
+                else:
+                    mistakes = ability.get("common_mistakes", [])
+                    if mistakes:
+                        detail = mistakes[0]
         return RealtimeTip(
             state=PlayerState.DYING,
             text=f"Held ult @ {pct}%",
-            detail="Next life: use it earlier or before you commit.",
+            detail=detail,
             urgency="crit",
         )
+
     if last_death.cooldowns_available:
-        abilities = ", ".join(last_death.cooldowns_available[:2])
+        # Convert slot IDs to hero-specific ability names.
+        labels = HERO_ABILITY_LABELS.get(hero or "", {}) if hero else {}
+        pretty = []
+        for slot_id in last_death.cooldowns_available[:2]:
+            slot_key = "slot" + slot_id[-1]
+            name = labels.get(slot_key)
+            pretty.append(name.replace("_", " ").title() if name else slot_id)
+        text = f"Had {' + '.join(pretty)} ready"
+        detail = "Cooldowns are insurance. Use one to confirm engages."
+        if hero and pretty:
+            first_slot_id = last_death.cooldowns_available[0]
+            first_slot_key = "slot" + first_slot_id[-1]
+            first_name = labels.get(first_slot_key)
+            if first_name:
+                opt = HERO_COACHING.get(hero, {}).get("abilities", {}).get(first_name, {}).get("optimal_use", [])
+                if opt:
+                    detail = f"Spend {pretty[0]} on: {opt[0].lower()}"
         return RealtimeTip(
             state=PlayerState.DYING,
-            text=f"Had {abilities} ready",
-            detail="Cooldowns are insurance. Use one to confirm engages.",
+            text=text,
+            detail=detail,
             urgency="crit",
         )
+
+    # Generic death (no ult, no cooldowns): give hero-specific positioning tip
+    if hero and hero in HERO_COACHING:
+        mistakes = HERO_COACHING[hero].get("positioning", {}).get("common_positioning_mistakes", [])
+        if mistakes:
+            return RealtimeTip(
+                state=PlayerState.DYING, text="Reset fully.",
+                detail=f"Common {hero.title()} death cause: {mistakes[0].lower()}",
+            )
     return RealtimeTip(
         state=PlayerState.DYING,
         text="Reset fully.",

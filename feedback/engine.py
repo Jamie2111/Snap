@@ -151,6 +151,42 @@ def _grade(ult_score: int, deaths: int) -> str:
     return "D"
 
 
+def _hero_ult_advice(hero: Optional[str], pct: float) -> tuple[str, str]:
+    """Pull hero-specific ult advice from HERO_COACHING. Returns (principle, next_step).
+
+    Looks for the hero's ult ability in their coaching profile and uses
+    feedback_templates.died_holding if available, else synthesizes from
+    common_mistakes. Falls back to a hero-named generic line as last resort."""
+    from knowledge.hero_stats import HERO_ABILITY_LABELS
+    if not hero:
+        return ("Holding an ult into death is the single highest-cost mistake in Overwatch.",
+                "Use ult when you have above 80 percent charge. A used ult creates pressure.")
+    coach = HERO_COACHING.get(hero, {})
+    ult_key = HERO_ABILITY_LABELS.get(hero, {}).get("ult")
+    ability = coach.get("abilities", {}).get(ult_key, {}) if ult_key else {}
+
+    feedback = ability.get("feedback_templates", {})
+    template = feedback.get("died_holding")
+    if template:
+        try:
+            next_step = sanitize_text(template.format(pct=pct, duration=0))
+        except Exception:
+            next_step = sanitize_text(template)
+    else:
+        mistakes = ability.get("common_mistakes", [])
+        if mistakes:
+            next_step = sanitize_text(mistakes[0])
+        else:
+            ult_name = (ult_key or "ult").replace("_", " ")
+            next_step = (f"Use {ult_name} closer to full charge. "
+                         f"A {hero.title()} ult left unused is a fight your team has to win without it.")
+
+    principle = sanitize_text(coach.get("win_condition", "")) or (
+        "Holding an ult into death is the single highest-cost mistake in Overwatch."
+    )
+    return principle, next_step
+
+
 def _critical_from_ult_deaths(
     events: SessionEvents,
     match: MatchContext,
@@ -160,15 +196,12 @@ def _critical_from_ult_deaths(
     if not events.deaths:
         return out
     hero = match.your_hero
-    coach = HERO_COACHING.get(hero or "", {})
-    win = coach.get("win_condition", "")
     for d in events.deaths:
         if d.ult_pct_at_death < 0.80:
             continue
         ts = d.timestamp
         ctx = _context_phrase(match)
-        principle = win or "Holding an ult into death is the single highest-cost mistake in Overwatch."
-        next_step = "Use ult when you have above 80 percent. A used ult creates pressure. A held ult creates nothing."
+        principle, next_step = _hero_ult_advice(hero, d.ult_pct_at_death)
         prior = history.get("mistake_history", {}).get("died_holding_ult", {})
         recurrence = prior.get("lifetime_count", 0) + 1
         out.append(
@@ -178,14 +211,18 @@ def _critical_from_ult_deaths(
                 context=sanitize_text(ctx),
                 historical_context="" if recurrence <= 1 else f"You have died with ult above 80 percent {recurrence} times.",
                 recurrence=recurrence,
-                principle=sanitize_text(principle),
-                next_step=sanitize_text(next_step),
+                principle=principle,
+                next_step=next_step,
             )
         )
     return out
 
 
 def _critical_from_held_cooldowns(events: SessionEvents, match: MatchContext) -> list[CriticalFeedback]:
+    """When the player died holding multiple cooldowns, surface a critical
+    that names the SPECIFIC abilities for their hero (not slot_1/slot_2)."""
+    from knowledge.hero_stats import HERO_ABILITY_LABELS
+
     out: list[CriticalFeedback] = []
     by_ability = Counter()
     for ch in events.cooldowns_held:
@@ -193,16 +230,52 @@ def _critical_from_held_cooldowns(events: SessionEvents, match: MatchContext) ->
             by_ability[ch.ability] += 1
     if not by_ability:
         return out
-    abilities = ", ".join(by_ability.keys())
+
+    # Convert slot IDs (ability_1, ability_2) to the hero's actual ability names.
+    hero = match.your_hero
+    labels = HERO_ABILITY_LABELS.get(hero or "", {}) if hero else {}
+    pretty = []
+    for slot_id in by_ability.keys():
+        # slot_id is "ability_1" .. "ability_4"; HERO_ABILITY_LABELS uses "slot1" .. "slot4"
+        slot_key = "slot" + slot_id[-1]
+        name = labels.get(slot_key)
+        if name:
+            pretty.append(name.replace("_", " ").title())
+        else:
+            pretty.append(slot_id.replace("_", " ").title())
+    abilities = ", ".join(pretty)
+
+    # Hero-specific principle if we have the coaching, else fall back.
+    principle = (
+        f"On {hero.title()}, holding {abilities} into death is throwing the engage's safety net."
+        if hero else
+        "Cooldowns are insurance against losing fights. A held cooldown into death is a free fight for the enemy."
+    )
+
+    # Hero-specific next step: pull the first ability's common_mistakes if any.
+    next_step = (
+        f"Use {pretty[0]} early to confirm or escape engages. Save the highest-impact cooldown for the decisive moment."
+    )
+    if hero:
+        coach = HERO_COACHING.get(hero, {})
+        first_slot_id = list(by_ability.keys())[0]
+        first_slot_key = "slot" + first_slot_id[-1]
+        first_name = labels.get(first_slot_key)
+        if first_name:
+            ability_data = coach.get("abilities", {}).get(first_name, {})
+            optimal = ability_data.get("optimal_use", [])
+            if optimal:
+                next_step = f"Spend {first_name.replace('_', ' ').title()} to {optimal[0]}"
+
     out.append(
         CriticalFeedback(
-            issue=f"Died with cooldowns available ({abilities}).",
+            issue=f"Died with {abilities} available.",
             timestamp=events.deaths[-1].timestamp if events.deaths else 0.0,
             context=_context_phrase(match),
             historical_context="",
             recurrence=sum(by_ability.values()),
-            principle="Cooldowns are insurance against losing fights. A held cooldown into death is a free fight for the enemy.",
-            next_step="Use the weakest cooldown to confirm engages. Save the best for the decisive moment.",
+            principle=sanitize_text(principle),
+            next_step=sanitize_text(next_step),
         )
     )
     return out
