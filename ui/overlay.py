@@ -1,23 +1,50 @@
-"""Floating always-on-top overlay window.
+"""Discord-style adaptive overlay.
 
-Tiny, dark, monospaced, draggable. Sits over whatever you're watching so you
-can keep an eye on Snap without leaving the video.
+Always-on-top, semi-transparent, sits over the gameplay without blocking it.
+Three render modes driven by the player_state field streamed in over stdin:
 
-Runs in its own subprocess (started via main.py) because Tkinter and rumps
-both want the macOS main thread. The subprocess receives state via JSON over
-stdin lines so we do not need to share Python objects across processes.
+    FIGHT   tiny pill in the corner (REC dot + clock + 1 word tip if any)
+    DYING   medium card with the death's root cause
+    SPAWN   medium card with what to do this life
+    LOBBY   full coaching card with the just-finished match's focus
+    PLAYING heartbeat-only pill
+
+Runs as its own subprocess so its tkinter loop does not fight rumps for the
+macOS main thread.
+
+Layout philosophy: minimal, glanceable, never blocks the center of the screen.
+Top-right by default, draggable.
 """
 
 from __future__ import annotations
 
 import json
+import select
 import sys
-import time
 from typing import Optional
 
 
-WIDTH = 260
-HEIGHT = 92
+PALETTE = {
+    "bg":              "#0b0b0d",
+    "bg_subtle":       "#15161a",
+    "border":          "#26282d",
+    "text":            "#e6e7ea",
+    "text_dim":        "#8e919a",
+    "text_muted":      "#5b5e66",
+    "accent":          "#5f8eff",
+    "rec":             "#ff3b30",
+    "warn":            "#ffb020",
+    "crit":            "#ff5e57",
+    "ok":              "#37d67a",
+}
+
+FONT_FAMILY = "SF Pro Display"
+FONT_MONO = "SF Mono"
+
+# Per-mode dimensions
+PILL_W, PILL_H = 160, 38
+CARD_W, CARD_H = 320, 110
+FULL_W, FULL_H = 360, 180
 
 
 def _format_clock(seconds: float) -> str:
@@ -30,9 +57,11 @@ def _format_clock(seconds: float) -> str:
 
 
 def run_overlay() -> None:
-    """Entrypoint when this module is invoked as a script (subprocess).
+    """Entrypoint when invoked as a subprocess.
 
-    Reads JSON snapshots from stdin, one per line. Last line wins."""
+    Reads JSON snapshots from stdin and re-renders one of three layouts based
+    on the player_state field. Layouts are achieved by recreating the inner
+    widgets when state changes, not by trying to morph one layout into another."""
 
     try:
         import tkinter as tk
@@ -48,68 +77,168 @@ def run_overlay() -> None:
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     try:
-        root.attributes("-alpha", 0.92)
+        root.attributes("-alpha", 0.93)
     except tk.TclError:
         pass
 
-    # Position top-right of the primary screen by default.
+    # Default position: top-right of primary screen
     screen_w = root.winfo_screenwidth()
-    x = screen_w - WIDTH - 20
-    y = 40
-    root.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
+    root.geometry(f"{PILL_W}x{PILL_H}+{screen_w - PILL_W - 24}+30")
+    root.configure(bg=PALETTE["bg"])
 
-    BG = "#0a0a0a"
-    FG = "#e6e6e6"
-    DIM = "#7a7a7a"
-    REC = "#ff3b30"
+    # Container frame (everything we render lives in here, so we can wipe
+    # and rebuild for mode switches)
+    container = tk.Frame(root, bg=PALETTE["bg"])
+    container.pack(fill="both", expand=True)
 
-    root.configure(bg=BG)
-    frame = tk.Frame(root, bg=BG, highlightthickness=1, highlightbackground="#222222")
-    frame.pack(fill="both", expand=True)
+    state_holder: dict = {
+        "current_mode": "init",
+        "last_snapshot": {},
+        "pulse_on": True,
+    }
 
-    header = tk.Frame(frame, bg=BG)
-    header.pack(fill="x", padx=12, pady=(10, 4))
-    dot_lbl = tk.Label(header, text="●", fg=REC, bg=BG, font=("SF Mono", 12, "bold"))
-    dot_lbl.pack(side="left")
-    rec_lbl = tk.Label(header, text="REC", fg=REC, bg=BG, font=("SF Mono", 10, "bold"), padx=6)
-    rec_lbl.pack(side="left")
-    clock_lbl = tk.Label(header, text="0:00", fg=FG, bg=BG, font=("SF Mono", 10))
-    clock_lbl.pack(side="right")
-
-    hero_lbl = tk.Label(frame, text="—", fg=FG, bg=BG, font=("SF Pro Display", 13, "bold"), anchor="w")
-    hero_lbl.pack(fill="x", padx=12, pady=(2, 0))
-    event_lbl = tk.Label(frame, text="No events yet", fg=DIM, bg=BG, font=("SF Mono", 9), anchor="w")
-    event_lbl.pack(fill="x", padx=12, pady=(0, 10))
-
-    # Drag to reposition
-    drag_state = {"x": 0, "y": 0}
+    # Drag-to-move
+    drag = {"x": 0, "y": 0}
 
     def on_press(e):
-        drag_state["x"] = e.x_root - root.winfo_x()
-        drag_state["y"] = e.y_root - root.winfo_y()
+        drag["x"] = e.x_root - root.winfo_x()
+        drag["y"] = e.y_root - root.winfo_y()
 
     def on_drag(e):
-        root.geometry(f"+{e.x_root - drag_state['x']}+{e.y_root - drag_state['y']}")
+        root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
 
-    for w in (frame, header, hero_lbl, event_lbl):
-        w.bind("<Button-1>", on_press)
-        w.bind("<B1-Motion>", on_drag)
+    def bind_drag(widget):
+        widget.bind("<Button-1>", on_press)
+        widget.bind("<B1-Motion>", on_drag)
 
-    pulse_state = {"on": True}
+    def clear_container():
+        for w in container.winfo_children():
+            w.destroy()
 
-    def pulse_dot():
-        pulse_state["on"] = not pulse_state["on"]
-        dot_lbl.config(fg=REC if pulse_state["on"] else "#660000")
-        root.after(700, pulse_dot)
+    def render_pill(snap: dict) -> None:
+        root.geometry(f"{PILL_W}x{PILL_H}")
+        clear_container()
+        bind_drag(container)
+        inner = tk.Frame(container, bg=PALETTE["bg"], padx=12, pady=8)
+        inner.pack(fill="both", expand=True)
+        bind_drag(inner)
+        dot_color = PALETTE["rec"] if state_holder["pulse_on"] else "#660000"
+        if not snap.get("recording"):
+            dot_color = PALETTE["text_muted"]
+        dot = tk.Label(inner, text="●", fg=dot_color, bg=PALETTE["bg"], font=(FONT_MONO, 11, "bold"))
+        dot.pack(side="left")
+        clock = tk.Label(inner, text=_format_clock(snap.get("elapsed_seconds", 0)),
+                         fg=PALETTE["text"], bg=PALETTE["bg"], font=(FONT_MONO, 10))
+        clock.pack(side="left", padx=(8, 0))
+        tip = snap.get("tip_text", "")
+        if tip:
+            color = PALETTE["warn"] if snap.get("tip_urgency") == "warn" else PALETTE["text_dim"]
+            tk.Label(inner, text=tip[:16], fg=color, bg=PALETTE["bg"],
+                     font=(FONT_MONO, 9, "bold")).pack(side="right")
+        bind_drag(dot)
+        bind_drag(clock)
 
-    pulse_dot()
+    def render_card(snap: dict, *, urgency_color: str) -> None:
+        root.geometry(f"{CARD_W}x{CARD_H}")
+        clear_container()
+        outer = tk.Frame(container, bg=PALETTE["bg"], padx=14, pady=12,
+                         highlightthickness=1, highlightbackground=PALETTE["border"])
+        outer.pack(fill="both", expand=True)
+        bind_drag(outer)
+        header = tk.Frame(outer, bg=PALETTE["bg"])
+        header.pack(fill="x")
+        bind_drag(header)
+        state_label = snap.get("player_state", "playing").upper()
+        tk.Label(header, text=state_label, fg=urgency_color, bg=PALETTE["bg"],
+                 font=(FONT_MONO, 9, "bold")).pack(side="left")
+        clock = tk.Label(header, text=_format_clock(snap.get("elapsed_seconds", 0)),
+                         fg=PALETTE["text_muted"], bg=PALETTE["bg"], font=(FONT_MONO, 9))
+        clock.pack(side="right")
+        bind_drag(clock)
+        tip_text = snap.get("tip_text", "") or "—"
+        tip_lbl = tk.Label(outer, text=tip_text, fg=PALETTE["text"], bg=PALETTE["bg"],
+                           font=(FONT_FAMILY, 13, "bold"), anchor="w", wraplength=CARD_W - 30,
+                           justify="left")
+        tip_lbl.pack(fill="x", pady=(6, 2))
+        bind_drag(tip_lbl)
+        detail = snap.get("tip_detail", "")
+        if detail:
+            tk.Label(outer, text=detail, fg=PALETTE["text_dim"], bg=PALETTE["bg"],
+                     font=(FONT_FAMILY, 10), anchor="w", wraplength=CARD_W - 30,
+                     justify="left").pack(fill="x")
 
-    last_snapshot: dict = {}
+    def render_full(snap: dict) -> None:
+        root.geometry(f"{FULL_W}x{FULL_H}")
+        clear_container()
+        outer = tk.Frame(container, bg=PALETTE["bg"], padx=16, pady=14,
+                         highlightthickness=1, highlightbackground=PALETTE["border"])
+        outer.pack(fill="both", expand=True)
+        bind_drag(outer)
+        header = tk.Frame(outer, bg=PALETTE["bg"])
+        header.pack(fill="x")
+        bind_drag(header)
+        tk.Label(header, text="BETWEEN MATCHES", fg=PALETTE["accent"], bg=PALETTE["bg"],
+                 font=(FONT_MONO, 9, "bold")).pack(side="left")
+        match_idx = snap.get("match_index", 0)
+        if match_idx:
+            tk.Label(header, text=f"#{match_idx} done",
+                     fg=PALETTE["text_muted"], bg=PALETTE["bg"],
+                     font=(FONT_MONO, 9)).pack(side="right")
+        title = snap.get("tip_text", "") or "Queue up."
+        tk.Label(outer, text=title, fg=PALETTE["text"], bg=PALETTE["bg"],
+                 font=(FONT_FAMILY, 14, "bold"), anchor="w", wraplength=FULL_W - 32,
+                 justify="left").pack(fill="x", pady=(8, 4))
+        detail = snap.get("tip_detail", "")
+        if detail:
+            tk.Label(outer, text=detail, fg=PALETTE["text_dim"], bg=PALETTE["bg"],
+                     font=(FONT_FAMILY, 11), anchor="w", wraplength=FULL_W - 32,
+                     justify="left").pack(fill="x", pady=(0, 8))
+        # Recent context line
+        hero = (snap.get("hero") or "").title()
+        enemies = snap.get("enemies", []) or []
+        if hero:
+            context_line = f"{hero}" + (
+                f"  ·  vs {', '.join(e.title() for e in enemies[:3])}" if enemies else ""
+            )
+            tk.Label(outer, text=context_line, fg=PALETTE["text_muted"], bg=PALETTE["bg"],
+                     font=(FONT_MONO, 9), anchor="w").pack(fill="x")
+
+    def pick_mode(snap: dict) -> str:
+        ps = snap.get("player_state", "playing")
+        if ps == "lobby":
+            return "full"
+        if ps == "dying":
+            return "card_crit"
+        if ps == "spawn":
+            return "card_warn"
+        if ps == "fight":
+            return "pill"
+        return "pill"
+
+    def render(snap: dict) -> None:
+        mode = pick_mode(snap)
+        if mode != state_holder["current_mode"]:
+            state_holder["current_mode"] = mode
+        if mode == "full":
+            render_full(snap)
+        elif mode == "card_crit":
+            render_card(snap, urgency_color=PALETTE["crit"])
+        elif mode == "card_warn":
+            render_card(snap, urgency_color=PALETTE["warn"])
+        else:
+            render_pill(snap)
+
+    def pulse():
+        state_holder["pulse_on"] = not state_holder["pulse_on"]
+        # Only redraw pill mode (others don't pulse to stay readable)
+        if state_holder["current_mode"] == "pill" and state_holder["last_snapshot"]:
+            render_pill(state_holder["last_snapshot"])
+        root.after(800, pulse)
+
+    pulse()
 
     def poll_stdin():
-        # Non-blocking-ish read of any available stdin lines
         try:
-            import select
             ready, _, _ = select.select([sys.stdin], [], [], 0)
             while ready:
                 line = sys.stdin.readline()
@@ -120,32 +249,16 @@ def run_overlay() -> None:
                     break
                 try:
                     snap = json.loads(line)
-                    last_snapshot.update(snap)
+                    state_holder["last_snapshot"] = snap
+                    render(snap)
                 except json.JSONDecodeError:
                     pass
                 ready, _, _ = select.select([sys.stdin], [], [], 0)
         except Exception:
             pass
+        root.after(250, poll_stdin)
 
-        if last_snapshot:
-            recording = last_snapshot.get("recording", False)
-            elapsed = float(last_snapshot.get("elapsed_seconds", 0.0))
-            hero = last_snapshot.get("hero") or "—"
-            last_event = last_snapshot.get("last_event") or "Watching..."
-
-            if recording:
-                dot_lbl.config(fg=REC)
-                rec_lbl.config(text="REC", fg=REC)
-            else:
-                dot_lbl.config(fg=DIM)
-                rec_lbl.config(text="IDLE", fg=DIM)
-                pulse_state["on"] = False
-            clock_lbl.config(text=_format_clock(elapsed))
-            hero_lbl.config(text=str(hero).title() if hero != "—" else "—")
-            event_lbl.config(text=last_event[:38])
-
-        root.after(500, poll_stdin)
-
+    render_pill({"recording": True, "elapsed_seconds": 0, "tip_text": "", "tip_urgency": "info"})
     poll_stdin()
 
     try:

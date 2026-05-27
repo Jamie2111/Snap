@@ -29,6 +29,12 @@ class LiveSnapshot:
     ults_wasted: int
     last_event: str
     recent_events: tuple[tuple[float, str], ...]
+    player_state: str = "playing"
+    tip_text: str = ""
+    tip_detail: str = ""
+    tip_urgency: str = "info"
+    match_index: int = 0
+    match_result_last: str = ""
 
 
 class LiveState:
@@ -48,6 +54,12 @@ class LiveState:
         self._ults_wasted = 0
         self._last_event = ""
         self._recent_events: deque[tuple[float, str]] = deque(maxlen=recent_event_limit)
+        self._player_state = "playing"
+        self._tip_text = ""
+        self._tip_detail = ""
+        self._tip_urgency = "info"
+        self._match_index = 0
+        self._match_result_last = ""
 
     def start(self) -> None:
         with self._lock:
@@ -86,6 +98,22 @@ class LiveState:
             if ult_wasted:
                 self._ults_wasted += 1
 
+    def set_player_state(self, state: str) -> None:
+        with self._lock:
+            self._player_state = state
+
+    def set_tip(self, text: str, detail: str = "", urgency: str = "info") -> None:
+        with self._lock:
+            self._tip_text = text
+            self._tip_detail = detail
+            self._tip_urgency = urgency
+
+    def set_match_progress(self, match_index: int, last_result: str = "") -> None:
+        with self._lock:
+            self._match_index = match_index
+            if last_result:
+                self._match_result_last = last_result
+
     def snapshot(self) -> LiveSnapshot:
         with self._lock:
             elapsed = (time.time() - self._started_at) if (self._recording and self._started_at) else 0.0
@@ -102,6 +130,12 @@ class LiveState:
                 ults_wasted=self._ults_wasted,
                 last_event=self._last_event,
                 recent_events=tuple(self._recent_events),
+                player_state=self._player_state,
+                tip_text=self._tip_text,
+                tip_detail=self._tip_detail,
+                tip_urgency=self._tip_urgency,
+                match_index=self._match_index,
+                match_result_last=self._match_result_last,
             )
 
 

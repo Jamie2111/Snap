@@ -473,9 +473,12 @@ def _capture_worker(
     from extractor.aim import AimTracker
     from extractor.game_state import extract_state
     from extractor.match_tracker import MatchTracker
+    from extractor.player_state import PlayerStateClassifier
     from extractor.vision import VisionPipeline
+    from feedback import realtime as realtime_tips
 
     tracker = MatchTracker(initial_hero=result.get("initial_hero"))
+    player_state_clf = PlayerStateClassifier()
     if result.get("initial_hero"):
         state.set_hero(result["initial_hero"])
     vision = VisionPipeline()
@@ -501,7 +504,14 @@ def _capture_worker(
                 "recording": snap.recording,
                 "elapsed_seconds": snap.elapsed_seconds,
                 "hero": snap.hero,
+                "enemies": list(snap.enemies),
                 "last_event": snap.last_event,
+                "player_state": snap.player_state,
+                "tip_text": snap.tip_text,
+                "tip_detail": snap.tip_detail,
+                "tip_urgency": snap.tip_urgency,
+                "match_index": snap.match_index,
+                "deaths": snap.deaths,
             }
             overlay_proc.stdin.write((_json.dumps(payload) + "\n").encode())
             overlay_proc.stdin.flush()
@@ -560,6 +570,37 @@ def _capture_worker(
                 if stats.ults_wasted > prev_ults_wasted:
                     state.record_event("Ult wasted", ult_wasted=True)
                     prev_ults_wasted = stats.ults_wasted
+
+            # Player state + real-time tip
+            try:
+                cls = player_state_clf.classify(cf.frame, gs, cf.timestamp)
+                state.set_player_state(cls.state.value)
+                if cur_match is not None:
+                    last_death_obj = cur_match.events.deaths[-1] if cur_match.events.deaths else None
+                else:
+                    last_death_obj = None
+                last_match_focus = ""
+                if tracker.matches:
+                    closed = [m for m in tracker.matches if m.ended_at is not None]
+                    if closed:
+                        last_match_focus = (
+                            "Use ult earlier" if any(d.ult_pct_at_death >= 0.80 for d in closed[-1].events.deaths)
+                            else ""
+                        )
+                tip = realtime_tips.generate(
+                    state=cls.state,
+                    hero=state.snapshot().hero,
+                    enemies=list(state.snapshot().enemies),
+                    last_death=last_death_obj,
+                    last_match_focus=last_match_focus or None,
+                )
+                if tip is not None:
+                    state.set_tip(tip.text, tip.detail, tip.urgency)
+                else:
+                    state.set_tip("", "", "info")
+                state.set_match_progress(len(tracker.matches))
+            except Exception:
+                log.exception("player-state / tip generation failed")
             push_overlay()
             if duration_seconds and (time.monotonic() - start_time) >= duration_seconds:
                 stopped_reason = "duration_reached"
@@ -900,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration", type=int, help="Auto-stop --live after N seconds")
     parser.add_argument("--no-menubar", action="store_true", help="Disable the macOS menu bar status icon")
     parser.add_argument("--no-overlay", action="store_true", help="Disable the floating overlay window")
+    parser.add_argument("--app", action="store_true", help="Launch the Snap desktop GUI (default when run with no args)")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -930,6 +972,10 @@ def main(argv: list[str] | None = None) -> int:
             menubar=not args.no_menubar,
             overlay=not args.no_overlay,
         )
+        return 0
+    if args.app or len(sys.argv) == 1:
+        from ui.app import run_app
+        run_app()
         return 0
     parser.print_help()
     return 1
