@@ -87,6 +87,18 @@ def _insight_panel(fb: Feedback) -> Optional[Panel]:
     return Panel("\n\n".join(blocks), title="Insight", border_style="magenta", box=ROUNDED)
 
 
+def _mechanics_panel(fb: Feedback) -> Optional[Panel]:
+    if not fb.mechanics:
+        return None
+    blocks: list[str] = []
+    for m in fb.mechanics:
+        blocks.append(
+            f"[blue bold]●[/] {m.metric}: [bold]{m.value}[/]\n"
+            f"   [italic dim]{m.interpretation}[/]"
+        )
+    return Panel("\n\n".join(blocks), title="Mechanics", border_style="blue", box=ROUNDED)
+
+
 def _coach_panel(fb: Feedback) -> Optional[Panel]:
     if not fb.coach_said:
         return None
@@ -117,6 +129,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
         _critical_panel(fb),
         _improvement_panel(fb),
         _insight_panel(fb),
+        _mechanics_panel(fb),
         _coach_panel(fb),
         _focus_panel(fb),
     ) if p is not None]
@@ -166,6 +179,12 @@ def write_markdown(fb: Feedback, session_id: str, reports_dir: Optional[Path] = 
                 lines.append(f"  - Evidence: {ins.evidence}")
             if ins.principle:
                 lines.append(f"  - Principle: {ins.principle}")
+        lines.append("")
+    if fb.mechanics:
+        lines.append("## Mechanics")
+        for m in fb.mechanics:
+            lines.append(f"- **{m.metric}**: {m.value}")
+            lines.append(f"  - {m.interpretation}")
         lines.append("")
     if fb.coach_said:
         lines.append("## Coach Said")

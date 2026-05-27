@@ -83,6 +83,13 @@ class SessionStats:
     fight_durations: list[float] = field(default_factory=list)
     ults_used: int = 0
     ults_wasted: int = 0
+    # Vision-derived metrics (populated by VisionPipeline + AimTracker if enabled)
+    aim_frames_with_enemy: int = 0
+    aim_frames_on_target: int = 0
+    aim_avg_miss_px: float = 0.0
+    aim_near_misses: int = 0
+    ability_glow_counts: dict[str, int] = field(default_factory=dict)
+    screen_flash_count: int = 0
 
     @property
     def avg_ult_hold_time_after_full(self) -> float:

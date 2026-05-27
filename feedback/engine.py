@@ -67,12 +67,20 @@ class CoachQuote:
 
 
 @dataclass
+class MechanicsItem:
+    metric: str
+    value: str
+    interpretation: str
+
+
+@dataclass
 class Feedback:
     session_summary: SessionSummary
     critical: list[CriticalFeedback] = field(default_factory=list)
     improvement: list[ImprovementItem] = field(default_factory=list)
     insight: list[InsightItem] = field(default_factory=list)
     coach_said: list[CoachQuote] = field(default_factory=list)
+    mechanics: list[MechanicsItem] = field(default_factory=list)
     one_thing_to_focus_on: str = ""
     progress_acknowledgment: str = ""
     match_context: Optional[MatchContext] = None
@@ -360,6 +368,7 @@ def generate(
     improvements = _improvements(events, history)
     insights = _insights(events, match, history)
     coach_said = _coach_quotes(match.your_hero, mistake_types, db_conn)
+    mechanics = _mechanics(events)
     focus = _pick_focus(linted, improvements)
     progress = _progress_ack(history, events)
 
@@ -369,10 +378,46 @@ def generate(
         improvement=improvements,
         insight=insights,
         coach_said=coach_said,
+        mechanics=mechanics,
         one_thing_to_focus_on=focus,
         progress_acknowledgment=progress,
         match_context=match,
     )
+
+
+def _mechanics(events: SessionEvents) -> list[MechanicsItem]:
+    out: list[MechanicsItem] = []
+    s = events.stats
+    if s.aim_frames_with_enemy > 0:
+        on_target_pct = s.aim_frames_on_target / s.aim_frames_with_enemy
+        interpretation = (
+            "Tight tracking under pressure." if on_target_pct >= 0.30
+            else "Aim drifts off-target. Practice tracking drills."
+            if on_target_pct < 0.15
+            else "Tracking is workable; consistency is the gap."
+        )
+        out.append(MechanicsItem(
+            metric="Aim on target",
+            value=f"{on_target_pct:.0%} of frames an enemy was in sight",
+            interpretation=interpretation,
+        ))
+        out.append(MechanicsItem(
+            metric="Avg miss distance",
+            value=f"{s.aim_avg_miss_px:.0f}px from crosshair",
+            interpretation=(
+                "Most misses are reflick distance; mechanical."
+                if s.aim_avg_miss_px < 80
+                else "Misses are large; positioning gives you bad angles."
+            ),
+        ))
+    if s.ability_glow_counts:
+        top = max(s.ability_glow_counts.items(), key=lambda kv: kv[1])
+        out.append(MechanicsItem(
+            metric="Most visible ult effect",
+            value=f"{top[0]} ({top[1]} frames)",
+            interpretation="Either you used this ult or an enemy did; useful for ult-economy review.",
+        ))
+    return out
 
 
 def _coach_quotes(hero: Optional[str], mistake_types: list[str], db_conn) -> list[CoachQuote]:

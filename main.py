@@ -86,6 +86,13 @@ def run_demo() -> None:
     for s in states:
         det.ingest(s)
     events = det.finalize()
+    # Synthetic mechanics data so the demo shows the Mechanics panel.
+    events.stats.aim_frames_with_enemy = 240
+    events.stats.aim_frames_on_target = 41
+    events.stats.aim_avg_miss_px = 67.2
+    events.stats.aim_near_misses = 88
+    events.stats.ability_glow_counts = {"dragonblade": 14, "nano_boost": 6}
+    events.stats.screen_flash_count = 9
 
     match = MatchContext(
         your_hero="tracer",
@@ -130,12 +137,16 @@ def _run_offline_pipeline(
 ) -> None:
     """Common pipeline for offline modes (--replay, --video). Iterates frames,
     extracts state per frame, runs the hero observer (pick screen / spawn room
-    / scoreboard OCR), detects events, generates feedback, renders + saves the
-    report."""
+    / scoreboard OCR), runs the vision pipeline for aim + ability outcomes,
+    detects events, generates feedback, renders + saves the report."""
 
+    from collections import Counter
+
+    from extractor.aim import AimTracker
     from extractor.events import EventDetector
     from extractor.game_state import extract_state
     from extractor.match_context import MatchContextTracker
+    from extractor.vision import VisionPipeline
     from feedback.engine import generate
     from memory import database, player_profile
     from ui.report import render, write_markdown
@@ -147,6 +158,10 @@ def _run_offline_pipeline(
         tracker.set_initial_hero(initial_hero)
 
     det = EventDetector()
+    vision = VisionPipeline()
+    aim = AimTracker()
+    ability_glow_counts: Counter = Counter()
+    screen_flash_count = 0
     health_history: list[float] = []
     frames_processed = 0
     for cf in frame_source:
@@ -161,8 +176,24 @@ def _run_offline_pipeline(
             tracker.observe_frame(cf.frame)
         except Exception:
             log.exception("hero-observation pass failed on frame %d", frames_processed)
+        try:
+            bundle = vision.process(cf.frame)
+            aim.ingest(bundle)
+            for d in bundle.ability_glows:
+                ability_glow_counts[d.kind.split(":", 1)[-1]] += 1
+            if bundle.screen_flash is not None:
+                screen_flash_count += 1
+        except Exception:
+            log.exception("vision pass failed on frame %d", frames_processed)
         frames_processed += 1
     events = det.finalize()
+    aim_m = aim.snapshot()
+    events.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
+    events.stats.aim_frames_on_target = aim_m.frames_on_target
+    events.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
+    events.stats.aim_near_misses = aim_m.near_misses
+    events.stats.ability_glow_counts = dict(ability_glow_counts)
+    events.stats.screen_flash_count = screen_flash_count
     match = tracker.context
 
     conn = database.connect()
@@ -363,16 +394,23 @@ def _capture_worker(
     after the worker finishes."""
 
     import json as _json
+    from collections import Counter
     from capture.screen import live_capture, write_session_manifest
+    from extractor.aim import AimTracker
     from extractor.events import EventDetector
     from extractor.game_state import extract_state
     from extractor.match_context import MatchContextTracker
+    from extractor.vision import VisionPipeline
 
     tracker = MatchContextTracker()
     if result.get("initial_hero"):
         tracker.set_initial_hero(result["initial_hero"])
         state.set_hero(result["initial_hero"])
     det = EventDetector()
+    vision = VisionPipeline()
+    aim = AimTracker()
+    ability_glow_counts: Counter = Counter()
+    screen_flash_count = 0
     health_history: list[float] = []
     session_dir: Optional[Path] = None
     record = None
@@ -420,6 +458,15 @@ def _capture_worker(
                     state.record_event(f"hero confirmed: {observed}")
             except Exception:
                 log.exception("hero-observation pass failed")
+            try:
+                bundle = vision.process(cf.frame)
+                aim.ingest(bundle)
+                for d in bundle.ability_glows:
+                    ability_glow_counts[d.kind.split(":", 1)[-1]] += 1
+                if bundle.screen_flash is not None:
+                    screen_flash_count += 1
+            except Exception:
+                log.exception("vision pass failed")
             ctx = tracker.context
             if ctx.your_hero:
                 state.set_hero(ctx.your_hero)
@@ -447,7 +494,15 @@ def _capture_worker(
     finally:
         state.stop()
         push_overlay()
-        result["events"] = det.finalize()
+        events_final = det.finalize()
+        aim_m = aim.snapshot()
+        events_final.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
+        events_final.stats.aim_frames_on_target = aim_m.frames_on_target
+        events_final.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
+        events_final.stats.aim_near_misses = aim_m.near_misses
+        events_final.stats.ability_glow_counts = dict(ability_glow_counts)
+        events_final.stats.screen_flash_count = screen_flash_count
+        result["events"] = events_final
         result["match"] = tracker.context
         result["session_dir"] = session_dir
         result["record"] = record
