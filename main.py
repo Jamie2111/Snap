@@ -211,14 +211,7 @@ def run_video(video_path: Path, initial_hero: Optional[str] = None) -> None:
     )
 
 
-def run_live() -> None:
-    if not config.IS_WINDOWS:
-        console.print(
-            "[bold red]Live mode requires Windows.[/] "
-            "You are on a non-Windows platform. Use [bold]--replay[/] or [bold]--demo[/] instead."
-        )
-        sys.exit(2)
-
+def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str] = None) -> None:
     from capture.screen import live_capture, write_session_manifest
     from extractor.events import EventDetector
     from extractor.game_state import extract_state
@@ -229,11 +222,22 @@ def run_live() -> None:
     from ui.report import render, write_markdown
 
     banner(console, "SNAP")
-    console.print(
-        "[dim]Snap will auto-detect your hero from the pick screen, swap banner, or spawn room. "
-        "If detection fails, you can set an initial hero now (blank to skip).[/]"
-    )
-    initial = _prompt_initial_hero()
+    if config.IS_WINDOWS:
+        console.print(
+            "[dim]Snap captures OW2 and auto-stops when it loses focus. "
+            "Hero is auto-detected from pick screen / swap banner / spawn room / scoreboard.[/]"
+        )
+    else:
+        console.print(
+            "[yellow]Mac live mode:[/] [dim]Snap captures your main display continuously. "
+            "Fullscreen the OW2 footage (e.g. a YouTube video) for best results. "
+            "Press [bold]Ctrl+C[/] when you're done to generate the report. "
+            "macOS will prompt for Screen Recording permission the first time you run this.[/]"
+        )
+        if duration_seconds:
+            console.print(f"[dim]Auto-stop after {duration_seconds}s.[/]")
+
+    initial = initial_hero or _prompt_initial_hero()
     tracker = MatchContextTracker()
     if initial:
         tracker.set_initial_hero(initial)
@@ -244,26 +248,43 @@ def run_live() -> None:
 
     session_dir: Optional[Path] = None
     record = None
+    start_time = time.monotonic()
+    stopped_reason = "completed"
 
-    for cf, rec, sdir in live_capture(save_frames=False):
-        session_dir = sdir
-        record = rec
-        frames_seen += 1
-        try:
-            state = extract_state(cf.frame, cf.timestamp, health_history)
-        except Exception:
-            log.exception("extract_state failed")
-            continue
-        health_history.append(state.health_pct)
-        det.ingest(state)
-        try:
-            observed = tracker.observe_frame(cf.frame)
-            if observed:
-                last_event = f"hero observed: {observed}"
-        except Exception:
-            log.exception("hero-observation pass failed")
-        if frames_seen % 20 == 0:
-            render_live_status(console, tracker.context, frames_seen, last_event)
+    try:
+        for cf, rec, sdir in live_capture(save_frames=False):
+            session_dir = sdir
+            record = rec
+            frames_seen += 1
+            try:
+                state = extract_state(cf.frame, cf.timestamp, health_history)
+            except Exception:
+                log.exception("extract_state failed")
+                continue
+            health_history.append(state.health_pct)
+            det.ingest(state)
+            try:
+                observed = tracker.observe_frame(cf.frame)
+                if observed:
+                    last_event = f"hero observed: {observed}"
+            except Exception:
+                log.exception("hero-observation pass failed")
+            if frames_seen % 20 == 0:
+                render_live_status(console, tracker.context, frames_seen, last_event)
+            if duration_seconds and (time.monotonic() - start_time) >= duration_seconds:
+                stopped_reason = "duration_reached"
+                break
+    except KeyboardInterrupt:
+        stopped_reason = "ctrl_c"
+        console.print("\n[yellow]Stopping capture (Ctrl+C). Finalizing report...[/]")
+
+    if frames_seen == 0:
+        console.print(
+            "[bold red]No frames captured.[/] "
+            "If you're on macOS, grant Screen Recording permission in "
+            "System Settings > Privacy & Security > Screen Recording, then restart your terminal."
+        )
+        return
 
     events = det.finalize()
     match = tracker.context
@@ -280,7 +301,7 @@ def run_live() -> None:
         duration_minutes=(record.end_time - record.start_time) / 60.0 if record and record.end_time else 0.0,
         deaths=events.stats.deaths_total,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"frames": frames_seen},
+        raw_event={"frames": frames_seen, "stopped_reason": stopped_reason},
         feedback_given={"critical": [c.issue for c in feedback.critical]},
         allies=match.allies,
         enemies=match.enemies,
@@ -292,18 +313,20 @@ def run_live() -> None:
     player_profile.update_player_model(session_id, conn=conn)
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
-    console.print(f"\n[dim]Markdown report saved to {md_path}[/]")
+    console.print(f"\n[dim]Processed {frames_seen} frames ({stopped_reason}). Markdown report: {md_path}[/]")
     if session_dir is not None and record is not None:
         write_session_manifest(session_dir, record)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="snap")
-    parser.add_argument("--live", action="store_true", help="Live capture (Windows + OW2 required)")
+    parser.add_argument("--live", action="store_true",
+                        help="Live screen capture. Windows auto-stops on OW2 unfocus. macOS runs until Ctrl+C.")
     parser.add_argument("--replay", type=Path, help="Replay a session directory of PNG frames")
     parser.add_argument("--video", type=Path, help="Process a saved video file (MP4/MOV/MKV/WebM)")
     parser.add_argument("--demo", action="store_true", help="Run a canned synthetic session")
     parser.add_argument("--hero", type=str, help="Pre-set initial hero (skip the prompt)")
+    parser.add_argument("--duration", type=int, help="Auto-stop --live after N seconds")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -319,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         run_video(args.video, initial_hero=args.hero)
         return 0
     if args.live:
-        run_live()
+        run_live(duration_seconds=args.duration, initial_hero=args.hero)
         return 0
     parser.print_help()
     return 1

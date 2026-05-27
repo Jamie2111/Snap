@@ -80,6 +80,8 @@ def is_overwatch_focused() -> bool:
 
 
 def _screen_capture_iter(fps: int) -> Iterator[CaptureFrame]:
+    import cv2  # used for resize on Retina / non-1080p displays
+
     interval = 1.0 / max(fps, 1)
     next_tick = time.monotonic()
     with mss.mss() as sct:
@@ -89,6 +91,9 @@ def _screen_capture_iter(fps: int) -> Iterator[CaptureFrame]:
             ts = time.time()
             shot = sct.grab(monitor)
             frame = np.array(shot)[:, :, :3][:, :, ::-1].copy()
+            h, w = frame.shape[:2]
+            if (w, h) != (1920, 1080):
+                frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_AREA)
             yield CaptureFrame(timestamp=ts, frame=frame, in_focus=in_focus)
             next_tick += interval
             sleep_for = next_tick - time.monotonic()
