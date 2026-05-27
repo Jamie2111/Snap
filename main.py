@@ -331,17 +331,146 @@ def run_vod(video_path_or_url: str, title: Optional[str] = None) -> None:
     )
 
 
-def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str] = None) -> None:
+def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
+    """Spawn ui/overlay.py as a child process. We pipe JSON snapshots to its
+    stdin so it can run its own Tk loop without fighting rumps for the main
+    thread."""
+    import subprocess
+    import sys as _sys
+    try:
+        proc = subprocess.Popen(
+            [_sys.executable, "-m", "ui.overlay"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(config.BASE_DIR),
+        )
+        return proc
+    except Exception:
+        log.exception("Failed to launch overlay subprocess")
+        return None
+
+
+def _capture_worker(
+    state,  # LiveState
+    duration_seconds: Optional[int],
+    stop_event,  # threading.Event
+    result: dict,
+    overlay_proc=None,
+) -> None:
+    """Background thread: runs the capture loop, publishes to LiveState, and
+    stores final events / context in `result` for the main thread to consume
+    after the worker finishes."""
+
+    import json as _json
     from capture.screen import live_capture, write_session_manifest
     from extractor.events import EventDetector
     from extractor.game_state import extract_state
     from extractor.match_context import MatchContextTracker
+
+    tracker = MatchContextTracker()
+    if result.get("initial_hero"):
+        tracker.set_initial_hero(result["initial_hero"])
+        state.set_hero(result["initial_hero"])
+    det = EventDetector()
+    health_history: list[float] = []
+    session_dir: Optional[Path] = None
+    record = None
+    start_time = time.monotonic()
+    stopped_reason = "completed"
+    prev_death_count = 0
+    prev_ults_used = 0
+    prev_ults_wasted = 0
+    state.start()
+
+    def push_overlay():
+        if not overlay_proc or not overlay_proc.stdin:
+            return
+        try:
+            snap = state.snapshot()
+            payload = {
+                "recording": snap.recording,
+                "elapsed_seconds": snap.elapsed_seconds,
+                "hero": snap.hero,
+                "last_event": snap.last_event,
+            }
+            overlay_proc.stdin.write((_json.dumps(payload) + "\n").encode())
+            overlay_proc.stdin.flush()
+        except Exception:
+            pass
+
+    try:
+        for cf, rec, sdir in live_capture(save_frames=False):
+            if stop_event.is_set():
+                stopped_reason = "ui_stop"
+                break
+            session_dir = sdir
+            record = rec
+            state.tick_frame()
+            try:
+                gs = extract_state(cf.frame, cf.timestamp, health_history)
+            except Exception:
+                log.exception("extract_state failed")
+                continue
+            health_history.append(gs.health_pct)
+            det.ingest(gs)
+            try:
+                observed = tracker.observe_frame(cf.frame)
+                if observed:
+                    state.record_event(f"hero confirmed: {observed}")
+            except Exception:
+                log.exception("hero-observation pass failed")
+            ctx = tracker.context
+            if ctx.your_hero:
+                state.set_hero(ctx.your_hero)
+            if ctx.allies:
+                state.set_allies(list(ctx.allies))
+            if ctx.enemies:
+                state.set_enemies(list(ctx.enemies))
+            stats = det.events.stats
+            if stats.deaths_total > prev_death_count:
+                state.record_event("Death", death=True)
+                prev_death_count = stats.deaths_total
+            if stats.ults_used > prev_ults_used:
+                state.record_event("Ult used", ult_used=True)
+                prev_ults_used = stats.ults_used
+            if stats.ults_wasted > prev_ults_wasted:
+                state.record_event("Ult wasted", ult_wasted=True)
+                prev_ults_wasted = stats.ults_wasted
+            push_overlay()
+            if duration_seconds and (time.monotonic() - start_time) >= duration_seconds:
+                stopped_reason = "duration_reached"
+                break
+    except Exception:
+        log.exception("capture loop crashed")
+        stopped_reason = "error"
+    finally:
+        state.stop()
+        push_overlay()
+        result["events"] = det.finalize()
+        result["match"] = tracker.context
+        result["session_dir"] = session_dir
+        result["record"] = record
+        result["stopped_reason"] = stopped_reason
+
+
+def run_live(
+    duration_seconds: Optional[int] = None,
+    initial_hero: Optional[str] = None,
+    menubar: bool = True,
+    overlay: bool = True,
+) -> None:
+    import threading
+
     from feedback.engine import generate
     from memory import database, player_profile
-    from ui.display import banner, render_live_status
+    from ui import live_state
+    from ui.display import live_panel
     from ui.report import render, write_markdown
 
-    banner(console, "SNAP")
+    state = live_state.get()
+
+    console.rule("[bold]SNAP")
     if config.IS_WINDOWS:
         console.print(
             "[dim]Snap captures OW2 and auto-stops when it loses focus. "
@@ -349,56 +478,59 @@ def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str]
         )
     else:
         console.print(
-            "[yellow]Mac live mode:[/] [dim]Snap captures your main display continuously. "
-            "Fullscreen the OW2 footage (e.g. a YouTube video) for best results. "
-            "Press [bold]Ctrl+C[/] when you're done to generate the report. "
-            "macOS will prompt for Screen Recording permission the first time you run this.[/]"
+            "[dim]Mac live mode. Fullscreen the OW2 footage for best results. "
+            "Press [bold]Ctrl+C[/] (or Stop in the menu bar) to end the session. "
+            "macOS will prompt for Screen Recording permission the first time.[/]"
         )
         if duration_seconds:
             console.print(f"[dim]Auto-stop after {duration_seconds}s.[/]")
 
     initial = initial_hero or _prompt_initial_hero()
-    tracker = MatchContextTracker()
-    if initial:
-        tracker.set_initial_hero(initial)
-    det = EventDetector()
-    health_history: list[float] = []
-    frames_seen = 0
-    last_event = ""
 
-    session_dir: Optional[Path] = None
-    record = None
-    start_time = time.monotonic()
-    stopped_reason = "completed"
+    overlay_proc = _start_overlay_subprocess() if overlay else None
 
+    stop_event = threading.Event()
+    result: dict = {"initial_hero": initial}
+
+    worker = threading.Thread(
+        target=_capture_worker,
+        args=(state, duration_seconds, stop_event, result, overlay_proc),
+        daemon=True,
+    )
+    worker.start()
+
+    run_menubar = menubar and config.IS_MAC
     try:
-        for cf, rec, sdir in live_capture(save_frames=False):
-            session_dir = sdir
-            record = rec
-            frames_seen += 1
+        if run_menubar:
             try:
-                state = extract_state(cf.frame, cf.timestamp, health_history)
+                from ui import menubar as menubar_mod
+                menubar_mod.run(state, on_stop=lambda: stop_event.set())
             except Exception:
-                log.exception("extract_state failed")
-                continue
-            health_history.append(state.health_pct)
-            det.ingest(state)
-            try:
-                observed = tracker.observe_frame(cf.frame)
-                if observed:
-                    last_event = f"hero observed: {observed}"
-            except Exception:
-                log.exception("hero-observation pass failed")
-            if frames_seen % 20 == 0:
-                render_live_status(console, tracker.context, frames_seen, last_event)
-            if duration_seconds and (time.monotonic() - start_time) >= duration_seconds:
-                stopped_reason = "duration_reached"
-                break
+                log.exception("menu bar UI failed; falling back to terminal-only")
+                _await_with_terminal(state, worker, stop_event)
+        else:
+            _await_with_terminal(state, worker, stop_event)
     except KeyboardInterrupt:
-        stopped_reason = "ctrl_c"
+        stop_event.set()
         console.print("\n[yellow]Stopping capture (Ctrl+C). Finalizing report...[/]")
+    finally:
+        worker.join(timeout=10.0)
+        if overlay_proc:
+            try:
+                overlay_proc.terminate()
+            except Exception:
+                pass
 
-    if frames_seen == 0:
+    events = result.get("events")
+    match = result.get("match")
+    if events is None or match is None:
+        console.print(
+            "[bold red]No frames captured.[/] "
+            "If you're on macOS, grant Screen Recording permission in "
+            "System Settings > Privacy & Security > Screen Recording, then restart your terminal."
+        )
+        return
+    if state.snapshot().frames_seen == 0:
         console.print(
             "[bold red]No frames captured.[/] "
             "If you're on macOS, grant Screen Recording permission in "
@@ -406,13 +538,12 @@ def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str]
         )
         return
 
-    events = det.finalize()
-    match = tracker.context
     if initial and not match.your_hero:
         match.your_hero = initial
 
     conn = database.connect()
     feedback = generate(events, match, db_conn=conn)
+    record = result.get("record")
     session_id = record.session_id if record else uuid.uuid4().hex[:12]
     player_profile.write_session(
         session_id=session_id,
@@ -421,7 +552,7 @@ def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str]
         duration_minutes=(record.end_time - record.start_time) / 60.0 if record and record.end_time else 0.0,
         deaths=events.stats.deaths_total,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"frames": frames_seen, "stopped_reason": stopped_reason},
+        raw_event={"frames": state.snapshot().frames_seen, "stopped_reason": result.get("stopped_reason")},
         feedback_given={"critical": [c.issue for c in feedback.critical]},
         allies=match.allies,
         enemies=match.enemies,
@@ -433,9 +564,26 @@ def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str]
     player_profile.update_player_model(session_id, conn=conn)
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
-    console.print(f"\n[dim]Processed {frames_seen} frames ({stopped_reason}). Markdown report: {md_path}[/]")
-    if session_dir is not None and record is not None:
-        write_session_manifest(session_dir, record)
+    console.print(
+        f"\n[dim]Processed {state.snapshot().frames_seen} frames "
+        f"({result.get('stopped_reason')}). Markdown report: {md_path}[/]"
+    )
+    if result.get("session_dir") is not None and record is not None:
+        from capture.screen import write_session_manifest
+        write_session_manifest(result["session_dir"], record)
+
+
+def _await_with_terminal(state, worker, stop_event) -> None:
+    """Main thread: show the live Rich panel until the capture worker exits
+    or the user hits Ctrl+C."""
+    from ui.display import live_panel
+    try:
+        with live_panel(state, console=console):
+            while worker.is_alive():
+                worker.join(timeout=0.5)
+    except KeyboardInterrupt:
+        stop_event.set()
+        raise
 
 
 def run_list_vods() -> None:
@@ -588,6 +736,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--demo", action="store_true", help="Run a canned synthetic session")
     parser.add_argument("--hero", type=str, help="Pre-set initial hero (skip the prompt)")
     parser.add_argument("--duration", type=int, help="Auto-stop --live after N seconds")
+    parser.add_argument("--no-menubar", action="store_true", help="Disable the macOS menu bar status icon")
+    parser.add_argument("--no-overlay", action="store_true", help="Disable the floating overlay window")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -612,7 +762,12 @@ def main(argv: list[str] | None = None) -> int:
         run_vod(args.vod, title=args.vod_title)
         return 0
     if args.live:
-        run_live(duration_seconds=args.duration, initial_hero=args.hero)
+        run_live(
+            duration_seconds=args.duration,
+            initial_hero=args.hero,
+            menubar=not args.no_menubar,
+            overlay=not args.no_overlay,
+        )
         return 0
     parser.print_help()
     return 1
