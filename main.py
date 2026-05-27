@@ -539,6 +539,14 @@ def run_live(
         )
         if duration_seconds:
             console.print(f"[dim]Auto-stop after {duration_seconds}s.[/]")
+    # Visible warning if OCR is disabled so the user understands what's missing.
+    from extractor.ocr import TESSERACT_AVAILABLE
+    if not TESSERACT_AVAILABLE:
+        console.print(
+            "[bold yellow]Tesseract is not installed.[/] Hero / scoreboard / killfeed OCR is "
+            "disabled. Run [cyan]brew install tesseract[/] (macOS) for full functionality. "
+            "Vision and HUD extraction still work."
+        )
 
     initial = initial_hero or _prompt_initial_hero()
 

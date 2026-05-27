@@ -33,6 +33,29 @@ if pytesseract is not None and config.TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = config.TESSERACT_CMD
 
 
+def _check_tesseract_available() -> bool:
+    """Check once whether tesseract is installed and on PATH.
+
+    Without tesseract, no OCR is possible. We detect this at import time
+    so subsequent calls return early without raising or spamming logs."""
+    if pytesseract is None:
+        return False
+    import shutil
+    if shutil.which(config.TESSERACT_CMD) is None:
+        return False
+    return True
+
+
+TESSERACT_AVAILABLE = _check_tesseract_available()
+if not TESSERACT_AVAILABLE:
+    log.warning(
+        "Tesseract not installed or not on PATH. Hero/scoreboard/killfeed OCR is "
+        "disabled for this session. Install with: brew install tesseract (macOS) "
+        "or from https://github.com/UB-Mannheim/tesseract/wiki (Windows). "
+        "Snap will continue without OCR; vision and HUD extraction still work."
+    )
+
+
 HERO_ALIASES = {
     "soldier": "soldier76",
     "soldier 76": "soldier76",
@@ -66,8 +89,12 @@ def _preprocess_for_text(crop: np.ndarray, upscale: int = 2, invert: bool = Fals
     return thresh
 
 
+_ocr_warning_logged = False
+
+
 def _ocr(crop: np.ndarray, psm: int = 6, char_whitelist: Optional[str] = None) -> str:
-    if pytesseract is None:
+    global _ocr_warning_logged
+    if not TESSERACT_AVAILABLE or pytesseract is None:
         return ""
     if crop.size == 0:
         return ""
@@ -76,8 +103,13 @@ def _ocr(crop: np.ndarray, psm: int = 6, char_whitelist: Optional[str] = None) -
         cfg += f" -c tessedit_char_whitelist={char_whitelist}"
     try:
         return pytesseract.image_to_string(crop, config=cfg)
-    except Exception:
-        log.exception("OCR call failed")
+    except Exception as exc:
+        # Log at debug level after first occurrence to avoid log spam.
+        if not _ocr_warning_logged:
+            log.warning("OCR call failed (%s). Subsequent OCR failures suppressed.", exc)
+            _ocr_warning_logged = True
+        else:
+            log.debug("OCR call failed: %s", exc)
         return ""
 
 
