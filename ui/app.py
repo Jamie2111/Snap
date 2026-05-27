@@ -28,6 +28,11 @@ def _python_exec() -> str:
     return sys.executable
 
 
+class _NoFramesError(Exception):
+    """Raised by _run_live_inproc when zero frames were captured."""
+    pass
+
+
 def _to_jsonable(obj: Any) -> Any:
     """Convert dataclasses / dicts / lists recursively to JSON-safe values."""
     if is_dataclass(obj):
@@ -101,65 +106,249 @@ class Api:
     # ============ Background ops ============
 
     def run_live(self, hero: str = "") -> dict:
-        """Live capture spawns a subprocess (overlay needs its own window
-        across all Spaces) AND registers a background poller that detects
-        when the subprocess exits + the report JSON appears, then signals
-        the launcher to auto-navigate to the report view."""
+        """Live capture runs IN this launcher process (in a background thread),
+        not a subprocess. Reason: macOS Screen Recording permission is per
+        process and doesn't inherit through Popen. The launcher was started
+        from Terminal so it has the grant; a subprocess wouldn't.
 
-        cwd = config.BASE_DIR
-        args = [_python_exec(), str(cwd / "main.py"), "--live"]
-        h = (hero or "").strip().lower().replace(" ", "")
-        if h:
-            args.extend(["--hero", h])
-        spawned_at = self._now()
-        try:
-            proc = subprocess.Popen(args, cwd=str(cwd))
-            self._active_subprocs.append(proc)
-        except Exception as e:
-            log.exception("Failed to launch live capture")
-            return {"error": str(e)}
+        The overlay is still a subprocess (needs its own NSWindow across
+        Spaces) but it doesn't capture the screen, so no permission issue."""
 
         job_id = uuid.uuid4().hex[:12]
         Api._jobs[job_id] = {"status": "running", "result": None, "error": None, "mode": "live"}
+        h = (hero or "").strip().lower().replace(" ", "")
 
-        def watcher():
-            import time as _time
-            while proc.poll() is None:
-                _time.sleep(0.7)
-            # Subprocess ended. Look for the newest report JSON written after spawn.
-            for _ in range(40):
-                candidates = sorted(
-                    (p for p in config.REPORTS_DIR.glob("*.json")
-                     if p.stat().st_mtime >= spawned_at),
-                    key=lambda p: p.stat().st_mtime, reverse=True,
-                )
-                if candidates:
-                    try:
-                        payload = json.loads(candidates[0].read_text())
-                    except Exception as e:
-                        Api._jobs[job_id]["status"] = "error"
-                        Api._jobs[job_id]["error"] = f"Could not parse report: {e}"
-                        return
-                    # Detect the zero-frames diagnostic and surface it cleanly.
-                    if payload.get("stopped_reason") == "no_frames" or payload.get("frames") == 0:
-                        Api._jobs[job_id]["status"] = "error"
-                        Api._jobs[job_id]["error"] = "no_frames"
-                        Api._jobs[job_id]["error_payload"] = payload
-                        return
-                    Api._jobs[job_id]["result"] = payload.get("feedback", payload)
-                    Api._jobs[job_id]["status"] = "done"
-                    return
-                _time.sleep(0.3)
-            Api._jobs[job_id]["status"] = "error"
-            Api._jobs[job_id]["error"] = "no_report"
+        def runner():
+            try:
+                Api._jobs[job_id]["result"] = self._run_live_inproc(h)
+                Api._jobs[job_id]["status"] = "done"
+            except _NoFramesError:
+                Api._jobs[job_id]["status"] = "error"
+                Api._jobs[job_id]["error"] = "no_frames"
+            except Exception as e:
+                log.exception("Live capture job failed")
+                Api._jobs[job_id]["status"] = "error"
+                Api._jobs[job_id]["error"] = str(e)
 
-        threading.Thread(target=watcher, daemon=True).start()
+        threading.Thread(target=runner, daemon=True).start()
         return {"job_id": job_id}
 
-    @staticmethod
-    def _now() -> float:
+    def _run_live_inproc(self, hero: str) -> dict:
+        """Run the live capture pipeline in this thread. Spawns the overlay
+        subprocess for the UI, but does screen capture + extraction here so
+        Screen Recording permission inherits correctly from the parent process."""
+
+        import json as _json
         import time as _time
-        return _time.time()
+        from collections import Counter
+
+        # Reuse helpers from main.py
+        from main import _start_overlay_subprocess, _start_overlay_control_reader
+        from capture.screen import live_capture, write_session_manifest
+        from extractor.aim import AimTracker
+        from extractor.game_state import extract_state
+        from extractor.match_tracker import MatchTracker, aggregate_session_stats
+        from extractor.player_state import PlayerStateClassifier
+        from extractor.vision import VisionPipeline
+        from feedback import realtime as realtime_tips
+        from feedback.engine import generate_for_matches
+        from memory import database, player_profile
+        from ui import live_state
+
+        state = live_state.get()
+        if hero:
+            state.set_hero(hero)
+        state.start()
+
+        overlay_proc = _start_overlay_subprocess()
+        stop_event = threading.Event()
+        pause_flag = {"paused": False}
+        if overlay_proc is not None:
+            _start_overlay_control_reader(overlay_proc, stop_event, pause_flag)
+
+        tracker = MatchTracker(initial_hero=hero or None)
+        player_state_clf = PlayerStateClassifier()
+        vision = VisionPipeline()
+        aim = AimTracker()
+        ability_glow_counts: Counter = Counter()
+        screen_flash_count = 0
+        health_history: list[float] = []
+        session_dir = None
+        record = None
+        stopped_reason = "completed"
+        prev_d, prev_uu, prev_uw = 0, 0, 0
+
+        def push_overlay():
+            if not overlay_proc or not overlay_proc.stdin:
+                return
+            try:
+                snap = state.snapshot()
+                payload = {
+                    "recording": snap.recording,
+                    "elapsed_seconds": snap.elapsed_seconds,
+                    "hero": snap.hero,
+                    "enemies": list(snap.enemies),
+                    "last_event": snap.last_event,
+                    "player_state": snap.player_state,
+                    "tip_text": snap.tip_text,
+                    "tip_detail": snap.tip_detail,
+                    "tip_urgency": snap.tip_urgency,
+                    "match_index": snap.match_index,
+                    "deaths": snap.deaths,
+                }
+                overlay_proc.stdin.write((_json.dumps(payload) + "\n").encode())
+                overlay_proc.stdin.flush()
+            except Exception:
+                pass
+
+        try:
+            for cf, rec, sdir in live_capture(save_frames=False):
+                if stop_event.is_set():
+                    stopped_reason = "ui_stop"
+                    break
+                session_dir = sdir
+                record = rec
+                if pause_flag.get("paused"):
+                    state.tick_frame()
+                    push_overlay()
+                    continue
+                state.tick_frame()
+                try:
+                    tracker.ingest_frame(cf.frame, cf.timestamp)
+                except Exception:
+                    log.exception("match-tracker ingest failed")
+                try:
+                    gs = extract_state(cf.frame, cf.timestamp, health_history)
+                except Exception:
+                    log.exception("extract_state failed")
+                    continue
+                health_history.append(gs.health_pct)
+                tracker.ingest_state(gs)
+                try:
+                    observed = tracker.observe_frame_for_hero(cf.frame)
+                    if observed:
+                        state.record_event(f"hero confirmed: {observed}")
+                except Exception:
+                    log.exception("hero-observation failed")
+                try:
+                    bundle = vision.process(cf.frame)
+                    aim.ingest(bundle)
+                    for d in bundle.ability_glows:
+                        ability_glow_counts[d.kind.split(":", 1)[-1]] += 1
+                    if bundle.screen_flash is not None:
+                        screen_flash_count += 1
+                except Exception:
+                    log.exception("vision failed")
+                cur_match = tracker._current_match
+                if cur_match is not None:
+                    if cur_match.match_context.your_hero:
+                        state.set_hero(cur_match.match_context.your_hero)
+                    if cur_match.match_context.allies:
+                        state.set_allies(list(cur_match.match_context.allies))
+                    if cur_match.match_context.enemies:
+                        state.set_enemies(list(cur_match.match_context.enemies))
+                if tracker._current_detector is not None:
+                    s = tracker._current_detector.events.stats
+                    if s.deaths_total > prev_d:
+                        state.record_event("Death", death=True); prev_d = s.deaths_total
+                    if s.ults_used > prev_uu:
+                        state.record_event("Ult used", ult_used=True); prev_uu = s.ults_used
+                    if s.ults_wasted > prev_uw:
+                        state.record_event("Ult wasted", ult_wasted=True); prev_uw = s.ults_wasted
+                try:
+                    cls = player_state_clf.classify(cf.frame, gs, cf.timestamp)
+                    state.set_player_state(cls.state.value)
+                    last_death = (cur_match.events.deaths[-1] if cur_match and cur_match.events.deaths else None)
+                    tip = realtime_tips.generate(
+                        state=cls.state,
+                        hero=state.snapshot().hero,
+                        enemies=list(state.snapshot().enemies),
+                        last_death=last_death,
+                        last_match_focus=None,
+                    )
+                    if tip:
+                        state.set_tip(tip.text, tip.detail, tip.urgency)
+                    else:
+                        state.set_tip("", "", "info")
+                    state.set_match_progress(len(tracker.matches))
+                except Exception:
+                    log.exception("tip generation failed")
+                push_overlay()
+        except Exception:
+            log.exception("Capture loop crashed")
+            stopped_reason = "error"
+        finally:
+            state.stop()
+            push_overlay()
+            if overlay_proc:
+                try:
+                    overlay_proc.terminate()
+                except Exception:
+                    pass
+
+        matches = tracker.finalize()
+        aim_m = aim.snapshot()
+        if matches:
+            last = matches[-1]
+            last.events.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
+            last.events.stats.aim_frames_on_target = aim_m.frames_on_target
+            last.events.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
+            last.events.stats.aim_near_misses = aim_m.near_misses
+            last.events.stats.ability_glow_counts = dict(ability_glow_counts)
+            last.events.stats.screen_flash_count = screen_flash_count
+
+        frames_seen = state.snapshot().frames_seen
+        if frames_seen == 0:
+            raise _NoFramesError()
+
+        conn = database.connect()
+        fb = generate_for_matches(matches, db_conn=conn)
+        ctx = fb.match_context
+        session_id = uuid.uuid4().hex[:12]
+        try:
+            player_profile.write_session(
+                session_id=session_id, timestamp=_time.time(),
+                hero=ctx.your_hero if ctx else None,
+                duration_minutes=sum(m.duration_seconds for m in matches) / 60.0 if matches else 0.0,
+                deaths=fb.session_summary.deaths,
+                ult_efficiency_score=fb.session_summary.ult_efficiency_score,
+                raw_event={"frames": frames_seen, "stopped_reason": stopped_reason},
+                feedback_given={"critical": [c.issue for c in fb.critical]},
+                allies=ctx.allies if ctx else [], enemies=ctx.enemies if ctx else [],
+                your_comp=ctx.your_comp if ctx else None,
+                enemy_comp=ctx.enemy_comp if ctx else None,
+                conn=conn,
+            )
+            for m, mfb in zip(matches, fb.matches):
+                player_profile.write_match(
+                    session_id=session_id, match_index=m.match_index,
+                    started_at=m.started_at, ended_at=m.ended_at,
+                    duration_seconds=m.duration_seconds, map_name=m.map_name,
+                    result=m.result, hero=m.match_context.your_hero,
+                    allies=list(m.match_context.allies), enemies=list(m.match_context.enemies),
+                    your_comp=m.match_context.your_comp, enemy_comp=m.match_context.enemy_comp,
+                    deaths=m.events.stats.deaths_total,
+                    ult_efficiency_score=mfb.session_summary.ult_efficiency_score,
+                    aim_on_target_pct=(
+                        m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy
+                        if m.events.stats.aim_frames_with_enemy else 0.0
+                    ),
+                    raw_event={"events": m.events.stats.deaths_total},
+                    feedback_given={"critical": [c.issue for c in mfb.critical]},
+                    conn=conn,
+                )
+            agg = aggregate_session_stats(matches)
+            player_profile.write_mistakes_from_events(session_id, agg, conn=conn)
+            player_profile.update_player_model(session_id, conn=conn)
+        except Exception:
+            log.exception("Saving session failed (non-fatal)")
+        if session_dir is not None and record is not None:
+            try:
+                write_session_manifest(session_dir, record)
+            except Exception:
+                pass
+
+        return _to_jsonable(fb)
 
     def run_video(self, path: str, hero: str = "") -> dict:
         """Run --video as a background thread inside the launcher process,
