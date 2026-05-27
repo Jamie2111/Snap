@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Snap</title>
+<style>
+  :root {
+    --bg-0:        #0a0b0e;
+    --bg-1:        #101218;
+    --bg-card:     rgba(255, 255, 255, 0.035);
+    --bg-card-hi:  rgba(255, 255, 255, 0.06);
+    --border:      rgba(255, 255, 255, 0.07);
+    --border-hi:   rgba(255, 255, 255, 0.14);
+    --text:        rgba(255, 255, 255, 0.94);
+    --text-dim:    rgba(255, 255, 255, 0.58);
+    --text-muted:  rgba(255, 255, 255, 0.36);
+    --accent:      #6b9aff;
+    --ok:          #30d158;
+    --warn:        #ffb020;
+    --crit:        #ff5e57;
+    --font:        -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+    --font-mono:   "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+    --radius:      12px;
+    --radius-sm:   8px;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body {
+    height: 100%;
+    background:
+      radial-gradient(1200px 600px at 20% -10%, rgba(107, 154, 255, 0.10), transparent 60%),
+      radial-gradient(900px 500px at 110% 110%, rgba(255, 94, 87, 0.08), transparent 60%),
+      var(--bg-0);
+    color: var(--text);
+    font-family: var(--font);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .app {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ============ HEADER ============ */
+  header {
+    padding: 28px 40px 0 40px;
+    -webkit-app-region: drag;
+  }
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  .subtitle {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+  }
+  .chips {
+    display: flex;
+    gap: 6px;
+    margin-top: 12px;
+    -webkit-app-region: no-drag;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.02em;
+  }
+  .chip .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+  }
+  .chip.ok .dot { background: var(--ok); }
+  .chip.bad .dot { background: var(--crit); }
+  .chip.bad { color: var(--crit); }
+
+  /* ============ BODY ============ */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 40px 40px 40px;
+    -webkit-app-region: no-drag;
+  }
+
+  .section {
+    margin-top: 18px;
+  }
+  .section-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .card {
+    position: relative;
+    padding: 18px 18px 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    text-align: left;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(220px 80px at var(--mx, 50%) var(--my, 50%), rgba(107, 154, 255, 0.10), transparent 80%);
+    opacity: 0;
+    transition: opacity 200ms ease;
+    pointer-events: none;
+  }
+  .card:hover {
+    background: var(--bg-card-hi);
+    border-color: var(--border-hi);
+    transform: translateY(-1px);
+  }
+  .card:hover::before { opacity: 1; }
+  .card:active { transform: translateY(0) scale(0.997); }
+  .card[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+  .card-title {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .card-sub {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-dim);
+  }
+  .card-kbd {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+
+  /* ============ MODAL (in-app prompts) ============ */
+  dialog {
+    background: rgba(20, 22, 28, 0.85);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 0;
+    width: 380px;
+    max-width: 90vw;
+    box-shadow: 0 32px 64px rgba(0, 0, 0, 0.5);
+  }
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(6px);
+  }
+  .modal-body {
+    padding: 22px 24px 20px 24px;
+  }
+  .modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .modal-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+  .modal-input {
+    width: 100%;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 120ms ease;
+  }
+  .modal-input:focus { border-color: var(--accent); }
+  .modal-input + .modal-input { margin-top: 8px; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .btn {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text);
+    cursor: pointer;
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 120ms ease;
+  }
+  .btn:hover { background: rgba(255, 255, 255, 0.08); border-color: var(--border-hi); }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0a0b0e;
+    font-weight: 600;
+  }
+  .btn.primary:hover { background: #80a8ff; border-color: #80a8ff; }
+
+  /* ============ FOOTER ============ */
+  footer {
+    padding: 14px 40px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-align: center;
+    -webkit-app-region: no-drag;
+  }
+  footer a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  footer a:hover { text-decoration: underline; }
+
+  /* ============ Toast (status banner) ============ */
+  .toast {
+    position: fixed;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    padding: 10px 16px;
+    background: rgba(20, 22, 28, 0.92);
+    backdrop-filter: blur(24px);
+    border: 1px solid var(--border-hi);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="title-row">
+      <h1>Snap</h1>
+      <span class="subtitle">overwatch 2 coach</span>
+    </div>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <main>
+    <section class="section">
+      <div class="section-title">Play</div>
+      <div class="grid">
+        <div class="card" data-action="live">
+          <div class="card-title">Start live capture</div>
+          <div class="card-sub">Capture your screen, coach in real time, report on stop.</div>
+          <span class="card-kbd">⌘L</span>
+        </div>
+        <div class="card" data-action="video">
+          <div class="card-title">Analyze a video file</div>
+          <div class="card-sub">Pick an MP4 or WebM and run the live pipeline against it.</div>
+          <span class="card-kbd">⌘V</span>
+        </div>
+        <div class="card" data-action="replay">
+          <div class="card-title">Replay saved frames</div>
+          <div class="card-sub">Re-run a previously captured session directory.</div>
+        </div>
+        <div class="card" data-action="demo">
+          <div class="card-title">Demo report</div>
+          <div class="card-sub">Generate a sample 3-match report without any input.</div>
+          <span class="card-kbd">⌘D</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title">Learn</div>
+      <div class="grid">
+        <div class="card" data-action="vod">
+          <div class="card-title">Ingest a coach VOD</div>
+          <div class="card-sub">Transcribe + tag a coach review for the Coach Said tier.</div>
+        </div>
+        <div class="card" data-action="list-vods">
+          <div class="card-title">Browse VOD library</div>
+          <div class="card-sub">Every VOD you've ingested, with concept rollups.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-title">History</div>
+      <div class="grid">
+        <div class="card" data-action="open-reports">
+          <div class="card-title">Open reports folder</div>
+          <div class="card-sub" id="reports-path">data/reports/</div>
+        </div>
+        <div class="card" data-action="open-db">
+          <div class="card-title">Open memory database</div>
+          <div class="card-sub" id="db-path">data/profiles/snap.db</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Reports stream to the terminal. Overlay sits above the game.
+  </footer>
+</div>
+
+<!-- Modals -->
+<dialog id="dlg-live">
+  <div class="modal-body">
+    <div class="modal-title">Start live capture</div>
+    <div class="modal-sub">Type the hero you're starting on, or leave blank to auto-detect.</div>
+    <input type="text" class="modal-input" id="live-hero" placeholder="tracer" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn" data-cancel>Cancel</button>
+      <button class="btn primary" id="live-start">Start</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlg-video">
+  <div class="modal-body">
+    <div class="modal-title">Hero in this video</div>
+    <div class="modal-sub">Pick the hero of the player being recorded. Blank = auto-detect.</div>
+    <input type="text" class="modal-input" id="video-hero" placeholder="tracer" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn" data-cancel>Cancel</button>
+      <button class="btn primary" id="video-start">Analyze</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlg-vod">
+  <div class="modal-body">
+    <div class="modal-title">Ingest a coach VOD</div>
+    <div class="modal-sub">Paste a YouTube URL or local file path. Optional title for reports.</div>
+    <input type="text" class="modal-input" id="vod-src" placeholder="https://youtube.com/watch?v=..." autocomplete="off">
+    <input type="text" class="modal-input" id="vod-title" placeholder="Spilo reviews GM Tracer" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn" data-cancel>Cancel</button>
+      <button class="btn primary" id="vod-start">Ingest</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const api = (...args) => window.pywebview && window.pywebview.api;
+  const $ = (id) => document.getElementById(id);
+
+  function toast(msg, ms = 2400) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._tid);
+    toast._tid = setTimeout(() => t.classList.remove('show'), ms);
+  }
+
+  // Status chips
+  async function refreshStatus() {
+    try {
+      const status = await window.pywebview.api.get_status();
+      const wrap = $('chips');
+      wrap.innerHTML = '';
+      const items = [
+        { label: 'Tesseract', ok: status.tesseract },
+        { label: 'ffmpeg', ok: status.ffmpeg },
+        { label: 'yt-dlp', ok: status.ytdlp },
+        { label: 'Whisper model', ok: status.whisper },
+      ];
+      for (const it of items) {
+        const el = document.createElement('span');
+        el.className = 'chip ' + (it.ok ? 'ok' : 'bad');
+        el.innerHTML = `<span class="dot"></span>${it.label}`;
+        wrap.appendChild(el);
+      }
+      if (status.reports_path) $('reports-path').textContent = status.reports_path;
+      if (status.db_path) $('db-path').textContent = status.db_path;
+    } catch (e) {}
+  }
+
+  // Hover ripple (subtle, follows mouse)
+  document.querySelectorAll('.card').forEach((card) => {
+    card.addEventListener('mousemove', (e) => {
+      const rect = card.getBoundingClientRect();
+      card.style.setProperty('--mx', `${e.clientX - rect.left}px`);
+      card.style.setProperty('--my', `${e.clientY - rect.top}px`);
+    });
+  });
+
+  // Card click handlers
+  document.querySelectorAll('[data-action]').forEach((el) => {
+    el.addEventListener('click', () => onAction(el.dataset.action));
+  });
+
+  // Dialog helpers
+  function openDialog(id) {
+    const dlg = $(id);
+    dlg.showModal();
+    dlg.querySelector('input')?.focus();
+  }
+  function closeDialog(id) {
+    $(id).close();
+  }
+  document.querySelectorAll('dialog [data-cancel]').forEach((btn) => {
+    btn.addEventListener('click', () => btn.closest('dialog').close());
+  });
+
+  // Action dispatch
+  async function onAction(action) {
+    switch (action) {
+      case 'live': return openDialog('dlg-live');
+      case 'video': {
+        const path = await window.pywebview.api.pick_video();
+        if (!path) return;
+        window._pendingVideo = path;
+        openDialog('dlg-video');
+        return;
+      }
+      case 'replay': {
+        const path = await window.pywebview.api.pick_replay_dir();
+        if (!path) return;
+        await window.pywebview.api.run_replay(path);
+        toast('Replay launched. Check your terminal for the report.');
+        return;
+      }
+      case 'demo':
+        await window.pywebview.api.run_demo();
+        toast('Demo launched. Report renders in the terminal.');
+        return;
+      case 'vod':
+        return openDialog('dlg-vod');
+      case 'list-vods':
+        await window.pywebview.api.list_vods();
+        toast('VOD library listed in the terminal.');
+        return;
+      case 'open-reports':
+        await window.pywebview.api.open_reports();
+        return;
+      case 'open-db':
+        await window.pywebview.api.open_db();
+        return;
+    }
+  }
+
+  $('live-start').addEventListener('click', async () => {
+    const hero = $('live-hero').value.trim();
+    closeDialog('dlg-live');
+    await window.pywebview.api.run_live(hero);
+    toast(hero ? `Live capture started on ${hero}.` : 'Live capture started.');
+  });
+
+  $('video-start').addEventListener('click', async () => {
+    const hero = $('video-hero').value.trim();
+    const path = window._pendingVideo;
+    closeDialog('dlg-video');
+    await window.pywebview.api.run_video(path, hero);
+    toast('Video analysis launched.');
+  });
+
+  $('vod-start').addEventListener('click', async () => {
+    const src = $('vod-src').value.trim();
+    if (!src) return;
+    const title = $('vod-title').value.trim();
+    closeDialog('dlg-vod');
+    await window.pywebview.api.ingest_vod(src, title);
+    toast('VOD ingestion launched (transcribe + tag).');
+  });
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key === 'l') { e.preventDefault(); onAction('live'); }
+    if (e.key === 'v') { e.preventDefault(); onAction('video'); }
+    if (e.key === 'd') { e.preventDefault(); onAction('demo'); }
+  });
+
+  // Wait for the JS API to be available, then populate
+  function whenReady() {
+    if (window.pywebview && window.pywebview.api) {
+      refreshStatus();
+    } else {
+      setTimeout(whenReady, 60);
+    }
+  }
+  whenReady();
+</script>
+</body>
+</html>
