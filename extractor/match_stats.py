@@ -27,22 +27,26 @@ class StatLine:
     benchmark: Optional[float] = None
     tier: str = "diamond"
     lower_is_better: bool = False
+    sample_size: int = 0           # raw count of observations (e.g. uses, deaths)
+    enough_data: bool = True       # if False, benchmark comparison is suppressed
 
     @property
     def has_benchmark(self) -> bool:
-        return self.benchmark is not None
+        return self.benchmark is not None and self.enough_data
 
     @property
     def delta_pct(self) -> Optional[float]:
-        """Percentage above/below the benchmark. Positive = above."""
-        if self.benchmark is None or self.benchmark == 0:
+        """Percentage above/below the benchmark. None when sample is too small
+        to be meaningful or no benchmark exists."""
+        if not self.has_benchmark or self.benchmark == 0:
             return None
         return ((self.value - self.benchmark) / self.benchmark) * 100.0
 
     @property
     def status(self) -> str:
-        """One of 'above', 'on_target', 'below', 'unknown'."""
-        if self.benchmark is None:
+        """One of 'above', 'on_target', 'below', 'unknown'. 'unknown' covers
+        the no-benchmark case AND the not-enough-data case."""
+        if not self.has_benchmark:
             return "unknown"
         d = self.delta_pct or 0
         if self.lower_is_better:
@@ -52,6 +56,14 @@ class StatLine:
         if d <= -20:
             return "below"
         return "on_target"
+
+
+# Minimum data required before benchmark comparison is meaningful.
+# A 30-second session can't fairly compare Pulse Bomb uses to a 10-minute rate.
+MIN_DURATION_FOR_ABILITY_BENCH = 120.0   # 2 min for slot-based ability usage
+MIN_DURATION_FOR_ULT_BENCH     = 300.0   # 5 min for ult throughput
+MIN_DURATION_FOR_SURVIVAL_BENCH = 180.0  # 3 min for deaths / survival rate
+MIN_FIGHTS_FOR_SURVIVAL_BENCH = 3        # need real engagements to grade survival
 
 
 @dataclass
@@ -87,12 +99,15 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
 
     # Ult metrics (apply to every hero)
     ult_label = labels.get("ult", "ult")
+    ult_enough = duration_seconds >= MIN_DURATION_FOR_ULT_BENCH and s.ults_used > 0
     out.stats.append(StatLine(
         label=f"{ult_label.replace('_', ' ').title()} uses per 10 min",
         value=round(_per_10min(s.ults_used, duration_seconds), 2),
         unit="/10m",
         benchmark=benchmark_for(hero, "ult_uses_per_10min", tier),
         tier=tier,
+        sample_size=s.ults_used,
+        enough_data=ult_enough,
     ))
     if s.ult_hold_durations:
         avg_hold = sum(s.ult_hold_durations) / len(s.ult_hold_durations)
@@ -103,6 +118,8 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
             benchmark=benchmark_for(hero, "ult_avg_hold_seconds", tier),
             tier=tier,
             lower_is_better=True,
+            sample_size=len(s.ult_hold_durations),
+            enough_data=len(s.ult_hold_durations) >= 2,
         ))
 
     # Per-ability-slot throughput
@@ -110,16 +127,19 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
         label = labels.get(slot_key)
         if not label:
             continue
-        slot_id = "ability_" + slot_key[-1]  # slot1 -> ability_1
+        slot_id = "ability_" + slot_key[-1]
         uses = _slot_uses(events, slot_id)
-        if uses == 0 and benchmark_for(hero, f"{slot_key}_uses_per_10min", tier) is None:
-            continue  # skip zeros for slots with no benchmark
+        bench = benchmark_for(hero, f"{slot_key}_uses_per_10min", tier)
+        if uses == 0 and bench is None:
+            continue
         out.stats.append(StatLine(
             label=f"{label.replace('_', ' ').title()} uses per 10 min",
             value=round(_per_10min(uses, duration_seconds), 1),
             unit="/10m",
-            benchmark=benchmark_for(hero, f"{slot_key}_uses_per_10min", tier),
+            benchmark=bench,
             tier=tier,
+            sample_size=uses,
+            enough_data=(duration_seconds >= MIN_DURATION_FOR_ABILITY_BENCH and uses > 0),
         ))
 
     # Universal survival metrics
@@ -130,6 +150,8 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
         benchmark=benchmark_for(hero, "deaths_per_10min", tier),
         tier=tier,
         lower_is_better=True,
+        sample_size=s.deaths_total,
+        enough_data=(duration_seconds >= MIN_DURATION_FOR_SURVIVAL_BENCH and s.deaths_total > 0),
     ))
     if s.fights_engaged_total > 0:
         out.stats.append(StatLine(
@@ -138,6 +160,8 @@ def compute_stats(hero: Optional[str], events: SessionEvents, duration_seconds: 
             unit="%",
             benchmark=(benchmark_for(hero, "fight_survival_rate", tier) or 0) * 100 or None,
             tier=tier,
+            sample_size=s.fights_engaged_total,
+            enough_data=s.fights_engaged_total >= MIN_FIGHTS_FOR_SURVIVAL_BENCH,
         ))
 
     return out

@@ -105,6 +105,8 @@ class StatItem:
     benchmark: Optional[float]
     delta_pct: Optional[float]
     status: str  # above | on_target | below | unknown
+    sample_size: int = 0
+    enough_data: bool = True
 
 
 @dataclass
@@ -485,6 +487,8 @@ def _stats_to_items(match_stats) -> list[StatItem]:
             benchmark=sl.benchmark,
             delta_pct=sl.delta_pct,
             status=sl.status,
+            sample_size=sl.sample_size,
+            enough_data=sl.enough_data,
         )
         for sl in match_stats.stats
     ]
@@ -542,7 +546,9 @@ def generate_for_matches(
     session_fb.match_summaries = summaries
     if per_match_stats:
         session_fb.stats = _stats_to_items(aggregate_stats(per_match_stats))
-        # Emit a critical for any stat that's significantly below benchmark.
+        # Only emit a critical when the stat has BOTH a benchmark AND enough
+        # data behind it. Otherwise we'd flag "0 pulse bombs in 30 seconds"
+        # as -100% below benchmark, which is mathematically true but useless.
         below = [s for s in session_fb.stats if s.status == "below" and s.benchmark is not None]
         for st in below[:2]:
             session_fb.critical.append(CriticalFeedback(

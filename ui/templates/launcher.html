@@ -930,20 +930,24 @@
     if (!stats || !stats.length) return '';
     let html = `<div class="panel context"><div class="panel-title">Stats</div>`;
     for (const s of stats) {
-      let benchHtml = '';
-      if (s.benchmark != null) {
-        benchHtml = `<span style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px;margin-left:8px;">target ${formatNum(s.benchmark)}${s.unit || ''}</span>`;
-      }
-      let deltaHtml = '';
-      if (s.delta_pct != null) {
-        const color = { above: 'var(--ok)', below: 'var(--crit)', on_target: 'var(--warn)', unknown: 'var(--text-muted)' }[s.status] || 'var(--text-muted)';
-        const sign = s.delta_pct >= 0 ? '+' : '';
-        deltaHtml = `<span style="color:${color};font-family:var(--font-mono);font-size:11px;font-weight:600;margin-left:8px;">${sign}${Math.round(s.delta_pct)}%</span>`;
+      let rightHtml = '';
+      if (s.enough_data === false) {
+        // Not enough samples / duration to compare to benchmark. Show value
+        // but explicitly mark it as inconclusive instead of fabricating a
+        // -100% delta.
+        rightHtml = `<span style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px;margin-left:8px;font-style:italic;">not enough data</span>`;
+      } else if (s.benchmark != null) {
+        rightHtml += `<span style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px;margin-left:8px;">target ${formatNum(s.benchmark)}${s.unit || ''}</span>`;
+        if (s.delta_pct != null) {
+          const color = { above: 'var(--ok)', below: 'var(--crit)', on_target: 'var(--warn)', unknown: 'var(--text-muted)' }[s.status] || 'var(--text-muted)';
+          const sign = s.delta_pct >= 0 ? '+' : '';
+          rightHtml += `<span style="color:${color};font-family:var(--font-mono);font-size:11px;font-weight:600;margin-left:8px;">${sign}${Math.round(s.delta_pct)}%</span>`;
+        }
       }
       html += `<div class="panel-item" style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;">
         <span class="lead" style="flex:1 1 auto;">${escapeHtml(s.label)}</span>
         <span style="font-family:var(--font-mono);font-weight:700;">${formatNum(s.value)}${s.unit || ''}</span>
-        ${benchHtml}${deltaHtml}
+        ${rightHtml}
       </div>`;
     }
     html += `</div>`;

@@ -80,10 +80,23 @@ def is_overwatch_focused() -> bool:
 
 
 def _screen_capture_iter(fps: int) -> Iterator[CaptureFrame]:
-    import cv2  # used for resize on Retina / non-1080p displays
+    """Capture a stream of CaptureFrames at ~fps.
+
+    Each frame is normalized to 1920x1080 RGB so downstream HUD-region
+    coords always line up. The normalizer:
+      1. Grabs the raw frame from the primary monitor via mss.
+      2. Auto-detects the 16:9 gameplay viewport (handles YouTube in a
+         Chrome window, partial-screen capture, etc.) the first time
+         the frame dimensions change.
+      3. Crops + resizes to 1920x1080.
+
+    See capture/viewport.py for the detection algorithm.
+    """
+    from capture.viewport import ViewportCache
 
     interval = 1.0 / max(fps, 1)
     next_tick = time.monotonic()
+    normalizer = ViewportCache()
     with mss.mss() as sct:
         monitor = sct.monitors[1]
         while True:
@@ -91,9 +104,10 @@ def _screen_capture_iter(fps: int) -> Iterator[CaptureFrame]:
             ts = time.time()
             shot = sct.grab(monitor)
             frame = np.array(shot)[:, :, :3][:, :, ::-1].copy()
-            h, w = frame.shape[:2]
-            if (w, h) != (1920, 1080):
-                frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_AREA)
+            try:
+                frame = normalizer.normalize(frame)
+            except Exception:
+                log.exception("Viewport normalize failed; using raw frame")
             yield CaptureFrame(timestamp=ts, frame=frame, in_focus=in_focus)
             next_tick += interval
             sleep_for = next_tick - time.monotonic()
@@ -194,6 +208,8 @@ def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
         "Video %s: %.1f fps, %d frames, sampling every %d frame(s)",
         video_path, video_fps, total_frames, skip,
     )
+    from capture.viewport import ViewportCache
+    normalizer = ViewportCache()
     progress_every = max(1, total_frames // 10) if total_frames else 0
     start = time.monotonic()
     frame_idx = 0
@@ -204,11 +220,12 @@ def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
             if not ret:
                 break
             if frame_idx % skip == 0:
-                h, w = frame.shape[:2]
-                if (w, h) != (1920, 1080):
-                    frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_AREA)
                 # cv2 returns BGR; rest of the pipeline expects RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                try:
+                    frame_rgb = normalizer.normalize(frame_rgb)
+                except Exception:
+                    log.exception("video viewport normalize failed")
                 ts = frame_idx / video_fps
                 yield CaptureFrame(timestamp=ts, frame=frame_rgb, in_focus=True)
                 sampled += 1
