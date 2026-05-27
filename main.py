@@ -123,29 +123,47 @@ def run_demo() -> None:
     console.print(f"\n[dim]Markdown report saved to {md_path}[/]")
 
 
-def run_replay(replay_dir: Path) -> None:
-    from capture.screen import replay_iter
+def _run_offline_pipeline(
+    frame_source,
+    source_label: str,
+    initial_hero: Optional[str] = None,
+) -> None:
+    """Common pipeline for offline modes (--replay, --video). Iterates frames,
+    extracts state per frame, runs the hero observer (pick screen / spawn room
+    / scoreboard OCR), detects events, generates feedback, renders + saves the
+    report."""
+
     from extractor.events import EventDetector
     from extractor.game_state import extract_state
-    from extractor.match_context import MatchContext
+    from extractor.match_context import MatchContextTracker
     from feedback.engine import generate
     from memory import database, player_profile
     from ui.report import render, write_markdown
 
-    console.print(f"[bold cyan]Snap[/]: replaying frames from {replay_dir}")
+    console.print(f"[bold cyan]Snap[/]: {source_label}")
+
+    tracker = MatchContextTracker()
+    if initial_hero:
+        tracker.set_initial_hero(initial_hero)
 
     det = EventDetector()
     health_history: list[float] = []
-    for cf in replay_iter(replay_dir):
-        state = extract_state(cf.frame, cf.timestamp, health_history)
+    frames_processed = 0
+    for cf in frame_source:
+        try:
+            state = extract_state(cf.frame, cf.timestamp, health_history)
+        except Exception:
+            log.exception("extract_state failed on frame %d", frames_processed)
+            continue
         health_history.append(state.health_pct)
         det.ingest(state)
+        try:
+            tracker.observe_frame(cf.frame)
+        except Exception:
+            log.exception("hero-observation pass failed on frame %d", frames_processed)
+        frames_processed += 1
     events = det.finalize()
-
-    match = MatchContext()
-    initial = _prompt_initial_hero()
-    if initial:
-        match.your_hero = initial
+    match = tracker.context
 
     conn = database.connect()
     feedback = generate(events, match, db_conn=conn)
@@ -157,8 +175,8 @@ def run_replay(replay_dir: Path) -> None:
         duration_minutes=0.0,
         deaths=events.stats.deaths_total,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"frames": len(health_history)},
-        feedback_given={},
+        raw_event={"frames": frames_processed},
+        feedback_given={"critical": [c.issue for c in feedback.critical]},
         allies=match.allies,
         enemies=match.enemies,
         your_comp=match.your_comp,
@@ -170,7 +188,27 @@ def run_replay(replay_dir: Path) -> None:
 
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
-    console.print(f"\n[dim]Markdown report saved to {md_path}[/]")
+    console.print(f"\n[dim]Processed {frames_processed} frames. Markdown report: {md_path}[/]")
+
+
+def run_replay(replay_dir: Path, initial_hero: Optional[str] = None) -> None:
+    from capture.screen import replay_iter
+
+    _run_offline_pipeline(
+        replay_iter(replay_dir),
+        f"replaying frames from {replay_dir}",
+        initial_hero=initial_hero or _prompt_initial_hero(),
+    )
+
+
+def run_video(video_path: Path, initial_hero: Optional[str] = None) -> None:
+    from capture.screen import video_iter
+
+    _run_offline_pipeline(
+        video_iter(video_path),
+        f"processing video {video_path}",
+        initial_hero=initial_hero or _prompt_initial_hero(),
+    )
 
 
 def run_live() -> None:
@@ -263,7 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="snap")
     parser.add_argument("--live", action="store_true", help="Live capture (Windows + OW2 required)")
     parser.add_argument("--replay", type=Path, help="Replay a session directory of PNG frames")
+    parser.add_argument("--video", type=Path, help="Process a saved video file (MP4/MOV/MKV/WebM)")
     parser.add_argument("--demo", action="store_true", help="Run a canned synthetic session")
+    parser.add_argument("--hero", type=str, help="Pre-set initial hero (skip the prompt)")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -273,7 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         run_demo()
         return 0
     if args.replay:
-        run_replay(args.replay)
+        run_replay(args.replay, initial_hero=args.hero)
+        return 0
+    if args.video:
+        run_video(args.video, initial_hero=args.hero)
         return 0
     if args.live:
         run_live()

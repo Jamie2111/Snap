@@ -167,5 +167,44 @@ def replay_iter(session_dir: Path) -> Iterator[CaptureFrame]:
         yield CaptureFrame(timestamp=ts, frame=img, in_focus=True)
 
 
+def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
+    """Yield CaptureFrames from a video file at the given fps.
+
+    Works on any MP4 / MOV / MKV / WebM that OpenCV can decode. Frames are
+    auto-resized to 1920x1080 to match the HUD region coords, so YouTube
+    downloads at any resolution work as long as the underlying gameplay was
+    recorded at 16:9 with the default HUD.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open video: {video_path}")
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    skip = max(1, int(round(video_fps / max(fps, 1))))
+    log.info(
+        "Video %s: %.1f fps, %d frames, sampling every %d frame(s)",
+        video_path, video_fps, total_frames, skip,
+    )
+    frame_idx = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % skip == 0:
+                h, w = frame.shape[:2]
+                if (w, h) != (1920, 1080):
+                    frame = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_AREA)
+                # cv2 returns BGR; rest of the pipeline expects RGB
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                ts = frame_idx / video_fps
+                yield CaptureFrame(timestamp=ts, frame=frame_rgb, in_focus=True)
+            frame_idx += 1
+    finally:
+        cap.release()
+
+
 def synthesize_blank_frame(width: int = 1920, height: int = 1080) -> np.ndarray:
     return np.zeros((height, width, 3), dtype=np.uint8)
