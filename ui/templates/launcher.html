@@ -690,6 +690,29 @@
           $('retry-live').addEventListener('click', back);
           return;
         }
+        // "no_hud" means Snap captured frames but couldn't see OW2 in them.
+        // This is what now fires when the user tested on a YouTube video
+        // that wasn't OW2 (and is what was previously fabricating a report).
+        if (res.error && res.error.startsWith('no_hud')) {
+          const detail = res.error.replace(/^no_hud:\s*/, '');
+          out.innerHTML = `
+            <div style="max-width:560px;margin:60px auto;text-align:center;">
+              <div style="font-size:48px;margin-bottom:8px;">🕹️</div>
+              <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;margin-bottom:8px;">
+                No Overwatch 2 HUD detected
+              </div>
+              <div style="color:var(--text-dim);font-size:13px;line-height:1.55;margin-bottom:20px;">
+                Snap recorded your screen but never saw the OW2 health bar,
+                ult charge, or ability tray. Rather than make up a report from
+                whatever was on screen, Snap stopped.<br><br>
+                ${escapeHtml(detail)}
+              </div>
+              <button class="btn primary" id="retry-live">Back</button>
+            </div>
+          `;
+          $('retry-live').addEventListener('click', back);
+          return;
+        }
         out.innerHTML = `<div class="empty">Error: ${escapeHtml(res.error || 'unknown')}</div>`;
       } else {
         out.innerHTML = `<div class="empty">Job not found.</div>`;

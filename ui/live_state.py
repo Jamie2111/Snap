@@ -39,12 +39,21 @@ class LiveSnapshot:
 
 class LiveState:
     """Thread-safe live publisher. Updated by the capture loop, read by every
-    UI surface. Holding the lock is cheap: every operation is O(1) or small."""
+    UI surface. Holding the lock is cheap: every operation is O(1) or small.
+
+    Pause accounting: when the overlay's pause button fires, the recording is
+    NOT stopped (so the session continues), but the elapsed clock must freeze.
+    We track `_pause_started_at` and `_paused_total_seconds` and subtract from
+    elapsed_seconds in snapshot(). Active pause time is included via a live
+    computation against `time.time()`."""
 
     def __init__(self, recent_event_limit: int = 8) -> None:
         self._lock = threading.RLock()
         self._recording = False
+        self._paused = False
         self._started_at = 0.0
+        self._pause_started_at = 0.0
+        self._paused_total_seconds = 0.0
         self._frames_seen = 0
         self._hero: Optional[str] = None
         self._allies: list[str] = []
@@ -64,11 +73,43 @@ class LiveState:
     def start(self) -> None:
         with self._lock:
             self._recording = True
+            self._paused = False
             self._started_at = time.time()
+            self._pause_started_at = 0.0
+            self._paused_total_seconds = 0.0
 
     def stop(self) -> None:
         with self._lock:
+            # If we stop while paused, close the open pause window so
+            # elapsed_seconds reflects the final value.
+            if self._paused and self._pause_started_at:
+                self._paused_total_seconds += time.time() - self._pause_started_at
+                self._pause_started_at = 0.0
+                self._paused = False
             self._recording = False
+
+    def pause(self) -> None:
+        """Freeze the elapsed clock. Idempotent: a second call while paused
+        does nothing."""
+        with self._lock:
+            if self._paused:
+                return
+            self._paused = True
+            self._pause_started_at = time.time()
+
+    def resume(self) -> None:
+        """Resume the elapsed clock. Adds the just-finished pause window to
+        the running paused-total. Idempotent."""
+        with self._lock:
+            if not self._paused:
+                return
+            self._paused_total_seconds += time.time() - self._pause_started_at
+            self._pause_started_at = 0.0
+            self._paused = False
+
+    def is_paused(self) -> bool:
+        with self._lock:
+            return self._paused
 
     def tick_frame(self) -> None:
         with self._lock:
@@ -116,7 +157,15 @@ class LiveState:
 
     def snapshot(self) -> LiveSnapshot:
         with self._lock:
-            elapsed = (time.time() - self._started_at) if (self._recording and self._started_at) else 0.0
+            if self._recording and self._started_at:
+                raw_elapsed = time.time() - self._started_at
+                paused_so_far = self._paused_total_seconds
+                if self._paused and self._pause_started_at:
+                    # Add the still-open pause window so elapsed freezes during pause.
+                    paused_so_far += time.time() - self._pause_started_at
+                elapsed = max(0.0, raw_elapsed - paused_so_far)
+            else:
+                elapsed = 0.0
             return LiveSnapshot(
                 recording=self._recording,
                 started_at=self._started_at,

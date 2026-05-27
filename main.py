@@ -454,6 +454,7 @@ def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
     stderr is written to data/sessions/.overlay.log so silent failures are
     debuggable. We also log immediately if Popen fails. Stale overlays from
     earlier crashes are killed first."""
+    import os as _os
     import subprocess
     import sys as _sys
     _kill_stale_overlay_procs()
@@ -464,13 +465,23 @@ def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
         with log_path.open("ab") as f:
             f.write(b"\n--- overlay spawn ---\n")
         stderr_f = log_path.open("ab")
+        env = _os.environ.copy()
+        # Force unbuffered stdout on the child. Without this, SNAP_CONTROL
+        # lines sit in Python's block buffer when stdout is a pipe and the
+        # parent's readline() blocks forever - which is exactly the "Stop
+        # button doesn't work until Pause is pressed" bug.
+        env["PYTHONUNBUFFERED"] = "1"
+        # Pass the control-file path to the overlay so it can fall back to a
+        # filesystem signal when stdout is still buffered for any reason.
+        env["SNAP_OVERLAY_CONTROL_FILE"] = str(config.SESSIONS_DIR / ".overlay-control")
         proc = subprocess.Popen(
-            [_sys.executable, "-m", "ui.overlay"],
+            [_sys.executable, "-u", "-m", "ui.overlay"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=stderr_f,
             cwd=str(config.BASE_DIR),
-            bufsize=1,
+            bufsize=0,
+            env=env,
         )
         log.info("Overlay subprocess spawned (pid=%s, log=%s)", proc.pid, log_path)
         return proc
@@ -479,12 +490,52 @@ def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
         return None
 
 
-def _start_overlay_control_reader(proc, stop_event, pause_flag) -> "threading.Thread":
+def _start_overlay_control_reader(proc, stop_event, pause_flag, live_state=None) -> "threading.Thread":
     """Read SNAP_CONTROL lines from the overlay subprocess and translate to
-    flag updates on the capture worker."""
-    import threading
+    flag updates on the capture worker. Also polls a filesystem signal file
+    (data/sessions/.overlay-control) every 200ms as a redundant channel that
+    survives stdout buffering glitches on macOS subprocess pipes.
 
-    def reader():
+    Passing the LiveState in lets us freeze its elapsed clock on PAUSE and
+    resume it on RESUME, instead of relying on the worker to do the time math."""
+    import threading
+    import time as _time
+
+    signal_path = config.SESSIONS_DIR / ".overlay-control"
+    try:
+        signal_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    def _apply(cmd: str) -> bool:
+        """Apply a SNAP_CONTROL command. Returns True if the reader should exit
+        (STOP) and False otherwise."""
+        cmd = cmd.strip().upper()
+        if cmd == "STOP":
+            log.info("Overlay requested STOP")
+            stop_event.set()
+            return True
+        if cmd == "PAUSE":
+            log.info("Overlay requested PAUSE")
+            pause_flag["paused"] = True
+            if live_state is not None:
+                try:
+                    live_state.pause()
+                except Exception:
+                    pass
+        if cmd == "RESUME":
+            log.info("Overlay requested RESUME")
+            pause_flag["paused"] = False
+            if live_state is not None:
+                try:
+                    live_state.resume()
+                except Exception:
+                    pass
+        return False
+
+    def stdout_reader():
         try:
             for raw in iter(proc.stdout.readline, b""):
                 if not raw:
@@ -492,23 +543,39 @@ def _start_overlay_control_reader(proc, stop_event, pause_flag) -> "threading.Th
                 line = raw.decode(errors="ignore").strip()
                 if not line.startswith("SNAP_CONTROL:"):
                     continue
-                cmd = line.split(":", 1)[1].strip().upper()
-                if cmd == "STOP":
-                    log.info("Overlay requested STOP")
-                    stop_event.set()
+                if _apply(line.split(":", 1)[1]):
                     return
-                if cmd == "PAUSE":
-                    log.info("Overlay requested PAUSE")
-                    pause_flag["paused"] = True
-                if cmd == "RESUME":
-                    log.info("Overlay requested RESUME")
-                    pause_flag["paused"] = False
         except Exception:
-            log.exception("Overlay control reader crashed")
+            log.exception("Overlay control reader (stdout) crashed")
 
-    t = threading.Thread(target=reader, daemon=True)
-    t.start()
-    return t
+    def signal_reader():
+        """Poll for the .overlay-control file. The overlay writes the command
+        to this file as a fallback if stdout is buffered. Each command is read
+        once and then the file is truncated."""
+        try:
+            while not stop_event.is_set():
+                try:
+                    if signal_path.exists():
+                        cmd = signal_path.read_text(errors="ignore").strip()
+                        try:
+                            signal_path.unlink()
+                        except FileNotFoundError:
+                            pass
+                        for piece in cmd.splitlines():
+                            piece = piece.strip()
+                            if not piece:
+                                continue
+                            if _apply(piece):
+                                return
+                except Exception:
+                    pass
+                _time.sleep(0.2)
+        except Exception:
+            log.exception("Overlay control reader (signal file) crashed")
+
+    threading.Thread(target=stdout_reader, daemon=True).start()
+    threading.Thread(target=signal_reader, daemon=True).start()
+    return None
 
 
 def _capture_worker(
@@ -528,6 +595,7 @@ def _capture_worker(
     from capture.screen import live_capture, write_session_manifest
     from extractor.aim import AimTracker
     from extractor.game_state import extract_state
+    from extractor.hud_confidence import HUDConfidenceTracker
     from extractor.match_tracker import MatchTracker
     from extractor.player_state import PlayerStateClassifier
     from extractor.vision import VisionPipeline
@@ -535,6 +603,7 @@ def _capture_worker(
 
     tracker = MatchTracker(initial_hero=result.get("initial_hero"))
     player_state_clf = PlayerStateClassifier()
+    hud_tracker = HUDConfidenceTracker()
     if result.get("initial_hero"):
         state.set_hero(result["initial_hero"])
     vision = VisionPipeline()
@@ -549,6 +618,8 @@ def _capture_worker(
     prev_death_count = 0
     prev_ults_used = 0
     prev_ults_wasted = 0
+    frames_with_hud = 0
+    frames_total = 0
     state.start()
 
     def push_overlay():
@@ -588,6 +659,27 @@ def _capture_worker(
                 push_overlay()
                 continue
             state.tick_frame()
+            frames_total += 1
+            # HUD presence gate. Same logic as the launcher's in-process
+            # runner: skip extraction on non-OW2 frames so we never produce
+            # fabricated events from random pixels.
+            try:
+                hud_tracker.ingest(cf.frame)
+            except Exception:
+                log.exception("HUD confidence measurement failed")
+            if not hud_tracker.is_capturing_ow2():
+                try:
+                    state.set_player_state("playing")
+                    state.set_tip(
+                        "Waiting for Overwatch 2",
+                        "Snap can't see the HUD. Make sure OW2 is in Borderless Windowed at 1920x1080.",
+                        "info",
+                    )
+                except Exception:
+                    pass
+                push_overlay()
+                continue
+            frames_with_hud += 1
             try:
                 tracker.ingest_frame(cf.frame, cf.timestamp)
             except Exception:
@@ -687,6 +779,8 @@ def _capture_worker(
         result["session_dir"] = session_dir
         result["record"] = record
         result["stopped_reason"] = stopped_reason
+        result["frames_with_hud"] = frames_with_hud
+        result["frames_total"] = frames_total
 
 
 def run_live(
@@ -735,7 +829,7 @@ def run_live(
     stop_event = threading.Event()
     pause_flag = {"paused": False}
     if overlay_proc is not None:
-        _start_overlay_control_reader(overlay_proc, stop_event, pause_flag)
+        _start_overlay_control_reader(overlay_proc, stop_event, pause_flag, live_state=state)
     result: dict = {"initial_hero": initial}
 
     worker = threading.Thread(
@@ -769,6 +863,18 @@ def run_live(
 
     matches = result.get("matches") or []
     frames_seen = state.snapshot().frames_seen
+    # HUD-detection gate. If the OW2 HUD was never confidently seen, don't
+    # render a report - it would be fabricated from non-OW2 content.
+    fwh = result.get("frames_with_hud", 0)
+    ft = result.get("frames_total", 0)
+    if ft >= 6 and fwh / max(1, ft) < 0.15:
+        console.print(
+            "[bold yellow]No Overwatch 2 HUD detected.[/] "
+            f"({fwh}/{ft} frames had a visible HUD). "
+            "Snap captured the screen but couldn't see OW2. "
+            "Make sure OW2 is in Borderless Windowed at 1920x1080 with default UI scale."
+        )
+        return
     if frames_seen == 0:
         # Still write a JSON sidecar so the launcher can show a useful error
         # instead of timing out on its watcher.

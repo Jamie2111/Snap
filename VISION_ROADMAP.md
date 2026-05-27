@@ -31,11 +31,26 @@ Consumed by:
    bladed *you* specifically." 5. **No projectile / hitbox tracking.** Pulse bomb stuck vs detonated in air?
    Currently invisible.
 
-## Next layer: pretrained YOLO + fine-tune
+## Next layer: pretrained YOLO + fine-tune (SHIPPED)
 
-**Cost:** 1-2 weeks. **Adds:** real character identification, hit-feedback
-classification, ability-impact zones.
+**Status:** Pretrained YOLOv8n is wired in `extractor/yolo_detector.py`.
+`VisionPipeline` tries it first when `ultralytics` is installed, falls back
+to classical HSV outline detection otherwise. Both produce the same
+`Detection` shape so downstream consumers are unchanged.
 
+**To enable:**
+```
+pip install ultralytics
+```
+First `--live` or `--video` run will auto-download `yolov8n.pt` (~6MB). Set
+`SNAP_YOLO_WEIGHTS=/path/to/weights.pt` to override, or drop a fine-tuned
+model at `data/models/snap-ow2.pt` and Snap will pick it up automatically.
+
+**Out-of-the-box:** detects "person" boxes (COCO class 0) as enemy
+characters. This is already a big upgrade because it doesn't depend on the
+OW2 outline color setting.
+
+**To unlock per-hero identification (1-2 week project):**
 1. **Data collection.** Grab ~500 OW2 frames per hero across maps, modes,
    skins. Tools: yt-dlp on pro gameplay channels + ffmpeg extract. Target
    ~20,000 frames total.
@@ -43,10 +58,12 @@ classification, ability-impact zones.
    (free tier). Auto-bootstrap with SAM (Segment Anything) + manual cleanup.
 3. **Fine-tune YOLOv8.** ~4 hours on a single GPU (rent a Lambda Cloud
    instance for $1-2). 80%+ mAP achievable for character detection.
-4. **Inference.** Replace `EnemyOutlineDetector` with `HeroYOLODetector`.
-   Same `Detector` protocol, drop-in. CPU inference at 2-5 fps is plenty.
+4. **Drop in.** Save the fine-tuned weights to `data/models/snap-ow2.pt`.
+   No code change required - `_resolve_model_path()` already looks there.
+5. **Update `_CHARACTER_CLASS_IDS`** in `extractor/yolo_detector.py` to
+   include the new per-hero classes.
 
-Outputs Snap gains:
+Outputs Snap gains (with fine-tune):
 - Per-frame "Brigitte at (x, y)" not just "enemy at (x, y)"
 - Robust to skin variations once skin frames are in training data
 - Confidence scores per detection (no more threshold tuning by hand)

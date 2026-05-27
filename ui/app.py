@@ -33,6 +33,13 @@ class _NoFramesError(Exception):
     pass
 
 
+class _NoHUDError(Exception):
+    """Raised when frames were captured but the OW2 HUD was never confidently
+    detected. The session was likely random non-OW2 content (Netflix, a
+    different game, the desktop) and we refuse to fabricate a report."""
+    pass
+
+
 def _to_jsonable(obj: Any) -> Any:
     """Convert dataclasses / dicts / lists recursively to JSON-safe values."""
     if is_dataclass(obj):
@@ -125,6 +132,9 @@ class Api:
             except _NoFramesError:
                 Api._jobs[job_id]["status"] = "error"
                 Api._jobs[job_id]["error"] = "no_frames"
+            except _NoHUDError as e:
+                Api._jobs[job_id]["status"] = "error"
+                Api._jobs[job_id]["error"] = f"no_hud: {e}"
             except Exception as e:
                 log.exception("Live capture job failed")
                 Api._jobs[job_id]["status"] = "error"
@@ -147,6 +157,7 @@ class Api:
         from capture.screen import live_capture, write_session_manifest
         from extractor.aim import AimTracker
         from extractor.game_state import extract_state
+        from extractor.hud_confidence import HUDConfidenceTracker
         from extractor.match_tracker import MatchTracker, aggregate_session_stats
         from extractor.player_state import PlayerStateClassifier
         from extractor.vision import VisionPipeline
@@ -164,10 +175,11 @@ class Api:
         stop_event = threading.Event()
         pause_flag = {"paused": False}
         if overlay_proc is not None:
-            _start_overlay_control_reader(overlay_proc, stop_event, pause_flag)
+            _start_overlay_control_reader(overlay_proc, stop_event, pause_flag, live_state=state)
 
         tracker = MatchTracker(initial_hero=hero or None)
         player_state_clf = PlayerStateClassifier()
+        hud_tracker = HUDConfidenceTracker()
         vision = VisionPipeline()
         aim = AimTracker()
         ability_glow_counts: Counter = Counter()
@@ -177,6 +189,8 @@ class Api:
         record = None
         stopped_reason = "completed"
         prev_d, prev_uu, prev_uw = 0, 0, 0
+        frames_with_hud = 0
+        frames_total = 0
 
         def push_overlay():
             if not overlay_proc or not overlay_proc.stdin:
@@ -213,6 +227,40 @@ class Api:
                     push_overlay()
                     continue
                 state.tick_frame()
+                frames_total += 1
+
+                # HUD presence gate. If the frame doesn't look like Overwatch
+                # 2 (e.g. the user is watching something else, switched apps,
+                # or there's a cinematic playing), do NOT feed it to the event
+                # detectors. This is the single most important defense against
+                # fabricated deaths / ults / cooldowns from random pixel noise.
+                try:
+                    hud_conf = hud_tracker.ingest(cf.frame)
+                except Exception:
+                    log.exception("HUD confidence measurement failed")
+                    hud_conf = None
+                hud_present = hud_tracker.is_capturing_ow2()
+                if hud_present:
+                    frames_with_hud += 1
+                else:
+                    # Frame is not OW2 gameplay. Update the overlay state so
+                    # the player sees "WAITING FOR OW2" instead of confident
+                    # nonsense, but don't ingest into trackers.
+                    try:
+                        state.set_player_state("playing")
+                        state.set_tip(
+                            "Waiting for Overwatch 2",
+                            (
+                                "Snap can't see the HUD. Make sure OW2 is in "
+                                "Borderless Windowed at 1920x1080 with default UI scale."
+                            ),
+                            "info",
+                        )
+                    except Exception:
+                        pass
+                    push_overlay()
+                    continue
+
                 try:
                     tracker.ingest_frame(cf.frame, cf.timestamp)
                 except Exception:
@@ -300,6 +348,23 @@ class Api:
         frames_seen = state.snapshot().frames_seen
         if frames_seen == 0:
             raise _NoFramesError()
+
+        # Data-integrity gate: if we never saw a confident OW2 HUD, the entire
+        # capture was random content (YouTube non-OW2 video, screensaver, the
+        # player's desktop). Refuse to produce a report rather than fabricating
+        # one from noise.
+        hud_ratio = (frames_with_hud / frames_total) if frames_total else 0.0
+        if frames_total >= 6 and hud_ratio < 0.15:
+            log.warning(
+                "Aborting report: HUD detected in %d / %d frames (%.0f%%)",
+                frames_with_hud, frames_total, hud_ratio * 100,
+            )
+            raise _NoHUDError(
+                f"HUD detected in only {int(hud_ratio * 100)}% of frames. "
+                f"Snap captured the screen but never saw Overwatch 2's HUD. "
+                f"Make sure OW2 is running, in Borderless Windowed at 1920x1080, "
+                f"and on the active desktop space."
+            )
 
         conn = database.connect()
         fb = generate_for_matches(matches, db_conn=conn)

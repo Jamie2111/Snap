@@ -187,13 +187,53 @@ class VisionPipeline:
     """Orchestrates the standard detector set. Wired into the live capture
     loop as an optional pass that runs every frame. Keep this lightweight;
     classical CV is fast but per-frame allocations matter at 2 fps over
-    long sessions."""
+    long sessions.
 
-    def __init__(self):
+    Enemy detection has two paths:
+      - Primary: HeroYOLODetector (ML, ultralytics) when available. Identifies
+        person silhouettes with confidence scores; independent of in-game
+        outline color setting.
+      - Fallback: EnemyOutlineDetector (HSV + contours). Requires default
+        outline color; ships everywhere because it has zero dependencies.
+
+    Both produce Detections with kind='enemy_outline' so downstream code
+    (AimTracker, mechanics feedback) is unchanged."""
+
+    def __init__(self, prefer_ml: bool = True):
         self.crosshair = CrosshairLocator()
-        self.enemy_outlines = EnemyOutlineDetector()
+        self._classical_outlines = EnemyOutlineDetector()
+        self._ml_outlines = None
+        self._ml_attempted = False
+        self.prefer_ml = prefer_ml
         self.ability_glows = AbilityGlowDetector()
         self.screen_flash = ScreenFlashDetector()
+
+    def _detect_enemies(self, frame: np.ndarray) -> list[Detection]:
+        """Try YOLO first; fall back to classical CV if YOLO isn't available
+        or fails. Tracking which path returned results lets us log once at
+        startup so the user knows which detector is active."""
+        if self.prefer_ml and not self._ml_attempted:
+            self._ml_attempted = True
+            try:
+                from extractor.yolo_detector import HeroYOLODetector, is_available
+                if is_available():
+                    self._ml_outlines = HeroYOLODetector()
+                    log.info("Vision: ML hero detector available, will try YOLO first")
+                else:
+                    log.info("Vision: ultralytics not installed, using classical CV detector")
+            except Exception:
+                log.exception("ML detector init failed; staying on classical CV")
+        if self._ml_outlines is not None:
+            try:
+                ml_out = self._ml_outlines.detect(frame)
+                if ml_out:
+                    return ml_out
+                # YOLO loaded but returned nothing this frame: not necessarily
+                # an error (no character on screen). Use classical anyway to
+                # catch outline-based silhouettes the ML may have missed.
+            except Exception:
+                log.exception("YOLO inference threw; using classical CV this frame")
+        return self._classical_outlines.detect(frame)
 
     def process(self, frame: np.ndarray) -> VisionBundle:
         bundle = VisionBundle()
@@ -202,7 +242,7 @@ class VisionPipeline:
         except Exception:
             log.exception("crosshair detect failed")
         try:
-            bundle.enemy_outlines = self.enemy_outlines.detect(frame)
+            bundle.enemy_outlines = self._detect_enemies(frame)
         except Exception:
             log.exception("enemy outline detect failed")
         try:
@@ -215,3 +255,9 @@ class VisionPipeline:
         except Exception:
             log.exception("screen flash detect failed")
         return bundle
+
+    @property
+    def using_ml(self) -> bool:
+        """True when the ML detector loaded successfully. UI / logs can use
+        this to surface that the upgraded detector is active."""
+        return self._ml_outlines is not None and self._ml_outlines.model_available

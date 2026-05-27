@@ -17,6 +17,7 @@ post-mortem. Never use AppKit / NSApp from background threads.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import traceback
@@ -27,16 +28,47 @@ def _html_url() -> str:
     return (Path(__file__).resolve().parent / "templates" / "overlay.html").as_uri()
 
 
+# Filesystem fallback channel for control commands. The parent process polls
+# this file every 200ms. Used as a redundant signal when stdout buffering on
+# the macOS subprocess pipe drops STOP commands that were sent before any
+# PAUSE/RESUME forced a flush. The parent injects the path via env so it
+# matches its watcher.
+_CONTROL_FILE = Path(os.environ.get("SNAP_OVERLAY_CONTROL_FILE", "")) if os.environ.get(
+    "SNAP_OVERLAY_CONTROL_FILE"
+) else None
+
+
 class _OverlayApi:
-    """JS bridge for the overlay's pause / stop buttons."""
+    """JS bridge for the overlay's pause / stop buttons. Every command is
+    written to BOTH stdout and a control file. Either channel is enough for
+    the parent to act on it; redundancy guards against macOS pipe buffering
+    eating the first STOP."""
 
     def send_command(self, cmd: str) -> None:
+        cmd = (cmd or "").strip().upper()
+        if not cmd:
+            return
         try:
             sys.stdout.write(f"SNAP_CONTROL:{cmd}\n")
             sys.stdout.flush()
+            # An extra newline forces some buffering policies to ship the line.
+            try:
+                os.fsync(sys.stdout.fileno())
+            except Exception:
+                pass
         except Exception:
-            sys.stderr.write("send_command failed\n")
+            sys.stderr.write("send_command stdout write failed\n")
             traceback.print_exc(file=sys.stderr)
+        # Filesystem fallback. The parent's signal reader polls this path.
+        if _CONTROL_FILE is not None:
+            try:
+                _CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+                # Append so multiple rapid commands aren't lost between polls.
+                with _CONTROL_FILE.open("a") as f:
+                    f.write(cmd + "\n")
+            except Exception:
+                sys.stderr.write("send_command signal-file write failed\n")
+                traceback.print_exc(file=sys.stderr)
 
 
 def run_overlay() -> None:
@@ -101,70 +133,97 @@ def run_overlay() -> None:
         threading.Timer(0.5, lambda: threading.Thread(target=stdin_reader, daemon=True).start()).start()
 
     def on_main_thread_post_start() -> None:
-        """Runs ONCE on the macOS main thread after the window is created.
-        This is the only safe place to touch AppKit / NSWindow APIs.
+        """Runs on macOS main thread after the window is created. Schedules
+        a repeating NSTimer (also on the main thread) that re-applies the
+        Spaces-spanning collection behavior to every overlay-titled window.
 
-        Sets the window to:
-          - join all macOS Spaces (visible across Space switches)
-          - stay above normal app windows (NSStatusWindowLevel = 25)
-          - remain visible even when other apps go full-screen
-        Each setting is wrapped individually; partial failure is fine."""
+        The retry loop matters because:
+          - pywebview can create the NSWindow asynchronously after this
+            callback fires, so the first attempt may find no windows.
+          - macOS occasionally resets collection behavior when the window
+            moves between screens or the dock state changes.
+          - pywebview may recreate the window if the page reloads.
+
+        We deliberately do NOT touch AppKit from a Python background thread:
+        the user already hit a hard process crash when that happened. NSTimer
+        runs on the runloop that scheduled it, which is the main runloop here.
+        """
         try:
-            from AppKit import NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary, NSWindowCollectionBehaviorFullScreenAuxiliary
+            from AppKit import (
+                NSApp,
+                NSWindowCollectionBehaviorCanJoinAllSpaces,
+                NSWindowCollectionBehaviorStationary,
+                NSWindowCollectionBehaviorFullScreenAuxiliary,
+                NSWindowCollectionBehaviorIgnoresCycle,
+            )
+            from Foundation import NSObject, NSTimer
         except Exception:
             sys.stderr.write("AppKit import failed; overlay will not span Spaces\n")
+            traceback.print_exc(file=sys.stderr)
             return
 
-        ns_window = None
+        mask = (
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehaviorIgnoresCycle
+        )
+        # NSStatusWindowLevel = 25; above normal windows + full-screen apps.
+        target_level = 25
+
+        class _Applier(NSObject):
+            """NSTimer target. The selector apply: runs on the main thread."""
+            applied_ids = set()
+
+            def apply_(self, _timer):
+                try:
+                    if NSApp is None:
+                        return
+                    windows = NSApp.windows()
+                    if windows is None:
+                        return
+                    for w in windows:
+                        try:
+                            title = str(w.title())
+                        except Exception:
+                            continue
+                        if title != "Snap":
+                            continue
+                        wid = id(w)
+                        # We re-apply every iteration to defeat macOS resets.
+                        try:
+                            w.setCollectionBehavior_(mask)
+                            w.setLevel_(target_level)
+                        except Exception:
+                            continue
+                        try:
+                            w.setHidesOnDeactivate_(False)
+                        except Exception:
+                            pass
+                        if wid not in self.applied_ids:
+                            self.applied_ids.add(wid)
+                            sys.stderr.write(
+                                f"Spaces behavior applied to overlay window 0x{wid:x}\n"
+                            )
+                except Exception:
+                    sys.stderr.write("Spaces re-apply tick failed\n")
+                    traceback.print_exc(file=sys.stderr)
+
+        applier = _Applier.alloc().init()
+        # Keep a strong reference so Python doesn't GC the applier or timer.
+        if not hasattr(sys.modules[__name__], "_spaces_applier"):
+            setattr(sys.modules[__name__], "_spaces_applier", applier)
         try:
-            native = getattr(window, "native", None)
-            if native is not None:
-                # pywebview cocoa backend: native is the WKWebView; .window() returns NSWindow
-                if hasattr(native, "window") and callable(native.window):
-                    ns_window = native.window()
-                else:
-                    ns_window = native
-        except Exception:
-            ns_window = None
-
-        if ns_window is None:
-            # Fallback: walk NSApp.windows() looking for our title
-            try:
-                from AppKit import NSApp
-                for w in (NSApp.windows() if NSApp else []):
-                    try:
-                        if str(w.title()) == "Snap":
-                            ns_window = w
-                            break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-        if ns_window is None:
-            sys.stderr.write("could not locate NSWindow; overlay limited to current Space\n")
-            return
-
-        try:
-            mask = (
-                NSWindowCollectionBehaviorCanJoinAllSpaces
-                | NSWindowCollectionBehaviorStationary
-                | NSWindowCollectionBehaviorFullScreenAuxiliary
+            # First attempt right now (might be too early; that's fine, the
+            # repeating timer will catch it within 500ms).
+            applier.apply_(None)
+            timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                0.5, applier, "apply:", None, True
             )
-            ns_window.setCollectionBehavior_(mask)
+            setattr(sys.modules[__name__], "_spaces_timer", timer)
         except Exception:
-            sys.stderr.write("setCollectionBehavior_ failed\n")
+            sys.stderr.write("Could not schedule Spaces-behavior NSTimer\n")
             traceback.print_exc(file=sys.stderr)
-        try:
-            # 25 = NSStatusWindowLevel; high enough to float over full-screen apps
-            ns_window.setLevel_(25)
-        except Exception:
-            sys.stderr.write("setLevel_ failed\n")
-            traceback.print_exc(file=sys.stderr)
-        try:
-            ns_window.setHidesOnDeactivate_(False)
-        except Exception:
-            pass
 
     try:
         webview.start(on_main_thread_post_start, debug=False)

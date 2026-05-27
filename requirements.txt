@@ -9,3 +9,8 @@ pywin32>=306; sys_platform == "win32"
 faster-whisper>=1.0.0
 rumps>=0.4.0; sys_platform == "darwin"
 pywebview>=5.0
+# Optional: ML vision upgrade for hero detection. Snap runs without it
+# (falls back to classical CV in extractor/vision.py); installing ultralytics
+# enables HeroYOLODetector for robust character localization independent of
+# the in-game outline color setting.
+ultralytics>=8.2.0; python_version < "3.14"
