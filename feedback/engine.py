@@ -59,11 +59,20 @@ class InsightItem:
 
 
 @dataclass
+class CoachQuote:
+    text: str
+    source: str
+    timestamp: float
+    relevance: str = ""
+
+
+@dataclass
 class Feedback:
     session_summary: SessionSummary
     critical: list[CriticalFeedback] = field(default_factory=list)
     improvement: list[ImprovementItem] = field(default_factory=list)
     insight: list[InsightItem] = field(default_factory=list)
+    coach_said: list[CoachQuote] = field(default_factory=list)
     one_thing_to_focus_on: str = ""
     progress_acknowledgment: str = ""
     match_context: Optional[MatchContext] = None
@@ -350,6 +359,7 @@ def generate(
 
     improvements = _improvements(events, history)
     insights = _insights(events, match, history)
+    coach_said = _coach_quotes(match.your_hero, mistake_types, db_conn)
     focus = _pick_focus(linted, improvements)
     progress = _progress_ack(history, events)
 
@@ -358,7 +368,27 @@ def generate(
         critical=linted,
         improvement=improvements,
         insight=insights,
+        coach_said=coach_said,
         one_thing_to_focus_on=focus,
         progress_acknowledgment=progress,
         match_context=match,
     )
+
+
+def _coach_quotes(hero: Optional[str], mistake_types: list[str], db_conn) -> list[CoachQuote]:
+    raw = player_profile.get_coach_quotes_for(hero, mistake_types, limit=3, conn=db_conn)
+    out: list[CoachQuote] = []
+    for q in raw:
+        relevance_bits = []
+        if hero and hero in q.get("heroes", []):
+            relevance_bits.append(f"matches {hero}")
+        overlap = set(mistake_types) & set(q.get("concepts", []))
+        if overlap:
+            relevance_bits.append(f"discusses {', '.join(sorted(overlap))}")
+        out.append(CoachQuote(
+            text=sanitize_text(q["text"].strip()),
+            source=q.get("title") or q.get("source", ""),
+            timestamp=q.get("timestamp", 0.0),
+            relevance="; ".join(relevance_bits),
+        ))
+    return out

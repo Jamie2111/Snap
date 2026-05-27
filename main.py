@@ -211,6 +211,72 @@ def run_video(video_path: Path, initial_hero: Optional[str] = None) -> None:
     )
 
 
+def run_vod(video_path: Path, title: Optional[str] = None) -> None:
+    """Ingest a VOD review: run the visual pipeline on the video to extract
+    in-video events, transcribe the audio with Whisper, tag hero/ability/concept
+    mentions, correlate quotes to events, persist everything to SQLite.
+
+    Once a VOD has been ingested, the Coach Said tier in future session reports
+    can surface relevant quotes whenever the player's session matches a topic
+    a coach has previously discussed."""
+
+    from capture.screen import video_iter
+    from extractor.events import EventDetector
+    from extractor.game_state import extract_state
+    from extractor.vod import ingest_vod
+    from memory import database
+
+    console.print(f"[bold cyan]Snap[/]: ingesting VOD {video_path}")
+    if not video_path.exists():
+        console.print(f"[bold red]Not found:[/] {video_path}")
+        return
+
+    # Pass 1: run the visual pipeline to extract in-video events.
+    console.print("[dim]Pass 1/2: extracting in-video game events...[/]")
+    det = EventDetector()
+    health_history: list[float] = []
+    frames_processed = 0
+    for cf in video_iter(video_path):
+        try:
+            state = extract_state(cf.frame, cf.timestamp, health_history)
+        except Exception:
+            log.exception("extract_state failed on frame %d", frames_processed)
+            continue
+        health_history.append(state.health_pct)
+        det.ingest(state)
+        frames_processed += 1
+    events = det.finalize()
+    console.print(
+        f"[dim]  {frames_processed} frames, "
+        f"{events.stats.deaths_total} death(s), "
+        f"{events.stats.ults_wasted} wasted ult(s)[/]"
+    )
+
+    # Pass 2: transcribe + tag + correlate.
+    console.print("[dim]Pass 2/2: transcribing audio and tagging quotes (first run downloads ~150MB)...[/]")
+    conn = database.connect()
+    try:
+        summary = ingest_vod(video_path, events, conn=conn, title=title)
+    except ImportError as e:
+        console.print(f"[bold red]{e}[/]\nRun: [cyan]pip install faster-whisper[/]")
+        return
+    except FileNotFoundError as e:
+        console.print(f"[bold red]Audio extraction failed.[/] Install ffmpeg:\n  brew install ffmpeg\n({e})")
+        return
+
+    console.print(
+        f"\n[green]VOD ingested.[/] "
+        f"review_id={summary['review_id']}, "
+        f"transcript={summary['segments']} segs, "
+        f"tagged={summary['tagged_quotes']} quotes, "
+        f"correlations={summary['correlations']}, "
+        f"duration={summary['duration_seconds']:.1f}s"
+    )
+    console.print(
+        "[dim]Future session reports will surface relevant quotes in the 'Coach Said' panel.[/]"
+    )
+
+
 def run_live(duration_seconds: Optional[int] = None, initial_hero: Optional[str] = None) -> None:
     from capture.screen import live_capture, write_session_manifest
     from extractor.events import EventDetector
@@ -323,7 +389,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true",
                         help="Live screen capture. Windows auto-stops on OW2 unfocus. macOS runs until Ctrl+C.")
     parser.add_argument("--replay", type=Path, help="Replay a session directory of PNG frames")
-    parser.add_argument("--video", type=Path, help="Process a saved video file (MP4/MOV/MKV/WebM)")
+    parser.add_argument("--video", type=Path, help="Process a saved video as if it were live gameplay")
+    parser.add_argument("--vod", type=Path,
+                        help="Ingest a VOD review: transcribe + tag coach commentary, correlate to events")
+    parser.add_argument("--vod-title", type=str, help="Friendly title for the VOD review (for reports)")
     parser.add_argument("--demo", action="store_true", help="Run a canned synthetic session")
     parser.add_argument("--hero", type=str, help="Pre-set initial hero (skip the prompt)")
     parser.add_argument("--duration", type=int, help="Auto-stop --live after N seconds")
@@ -340,6 +409,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.video:
         run_video(args.video, initial_hero=args.hero)
+        return 0
+    if args.vod:
+        run_vod(args.vod, title=args.vod_title)
         return 0
     if args.live:
         run_live(duration_seconds=args.duration, initial_hero=args.hero)

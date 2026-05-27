@@ -51,3 +51,43 @@ CREATE TABLE IF NOT EXISTS player_model (
 );
 
 INSERT OR IGNORE INTO player_model (id, updated_at) VALUES (1, 0.0);
+
+CREATE TABLE IF NOT EXISTS vod_reviews (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    title TEXT,
+    ingested_at REAL NOT NULL,
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript_json TEXT NOT NULL DEFAULT '[]',
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS vod_quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id TEXT NOT NULL,
+    start_seconds REAL NOT NULL,
+    end_seconds REAL NOT NULL,
+    text TEXT NOT NULL,
+    heroes_json TEXT NOT NULL DEFAULT '[]',
+    abilities_json TEXT NOT NULL DEFAULT '[]',
+    concepts_json TEXT NOT NULL DEFAULT '[]',
+    FOREIGN KEY (review_id) REFERENCES vod_reviews(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vod_quotes_review ON vod_quotes(review_id);
+
+CREATE TABLE IF NOT EXISTS vod_correlations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id TEXT NOT NULL,
+    quote_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    event_timestamp REAL NOT NULL,
+    score REAL NOT NULL,
+    delta_seconds REAL NOT NULL,
+    context_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (review_id) REFERENCES vod_reviews(id),
+    FOREIGN KEY (quote_id) REFERENCES vod_quotes(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vod_correlations_event ON vod_correlations(event_type);
+CREATE INDEX IF NOT EXISTS idx_vod_correlations_quote ON vod_correlations(quote_id);

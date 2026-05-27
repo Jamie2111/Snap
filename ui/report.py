@@ -87,6 +87,20 @@ def _insight_panel(fb: Feedback) -> Optional[Panel]:
     return Panel("\n\n".join(blocks), title="Insight", border_style="magenta", box=ROUNDED)
 
 
+def _coach_panel(fb: Feedback) -> Optional[Panel]:
+    if not fb.coach_said:
+        return None
+    blocks: list[str] = []
+    for q in fb.coach_said:
+        mm, ss = divmod(int(q.timestamp), 60)
+        head = f"[cyan bold]●[/] \"{q.text}\""
+        meta = f"   [dim]from {q.source} at {mm}:{ss:02d}[/]"
+        if q.relevance:
+            meta += f"  [dim italic]{q.relevance}[/]"
+        blocks.append(head + "\n" + meta)
+    return Panel("\n\n".join(blocks), title="Coach Said", border_style="cyan", box=ROUNDED)
+
+
 def _focus_panel(fb: Feedback) -> Panel:
     text = Text(fb.one_thing_to_focus_on or "", style="bold")
     if fb.progress_acknowledgment:
@@ -103,6 +117,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
         _critical_panel(fb),
         _improvement_panel(fb),
         _insight_panel(fb),
+        _coach_panel(fb),
         _focus_panel(fb),
     ) if p is not None]
     console.rule("[bold cyan]SNAP  Session Report")
@@ -151,6 +166,15 @@ def write_markdown(fb: Feedback, session_id: str, reports_dir: Optional[Path] = 
                 lines.append(f"  - Evidence: {ins.evidence}")
             if ins.principle:
                 lines.append(f"  - Principle: {ins.principle}")
+        lines.append("")
+    if fb.coach_said:
+        lines.append("## Coach Said")
+        for q in fb.coach_said:
+            mm, ss = divmod(int(q.timestamp), 60)
+            lines.append(f"- \"{q.text}\"")
+            lines.append(f"  - Source: {q.source} at {mm}:{ss:02d}")
+            if q.relevance:
+                lines.append(f"  - Why surfaced: {q.relevance}")
         lines.append("")
     lines.append("## Focus Next Game")
     lines.append(fb.one_thing_to_focus_on or "")

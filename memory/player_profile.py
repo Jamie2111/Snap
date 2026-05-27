@@ -316,6 +316,67 @@ def get_matchup_history(your_hero: str, enemy_hero: str, conn: Optional[sqlite3.
         return _do(c)
 
 
+def get_coach_quotes_for(
+    hero: Optional[str],
+    mistake_types: list[str],
+    limit: int = 3,
+    conn: Optional[sqlite3.Connection] = None,
+) -> list[dict]:
+    """Return up to `limit` ingested coach quotes that are relevant to the
+    current session: quotes that mention this hero AND any of the detected
+    mistake concepts. Correlated quotes (proven coach-on-event hits in past
+    VODs) are ranked higher than generic quotes.
+
+    Used by the feedback engine to surface a 'Coach said' tier."""
+
+    def _do(c: sqlite3.Connection) -> list[dict]:
+        if not mistake_types and not hero:
+            return []
+        rows = c.execute(
+            "SELECT q.id, q.start_seconds, q.text, q.heroes_json, q.concepts_json, "
+            "       v.source, v.title, "
+            "       COALESCE(MAX(cor.score), 0.0) AS best_score "
+            "FROM vod_quotes q "
+            "JOIN vod_reviews v ON v.id = q.review_id "
+            "LEFT JOIN vod_correlations cor ON cor.quote_id = q.id "
+            "GROUP BY q.id "
+            "ORDER BY best_score DESC, q.id DESC "
+        ).fetchall()
+
+        scored: list[tuple[float, dict]] = []
+        for r in rows:
+            heroes = _load(r["heroes_json"])
+            concepts = _load(r["concepts_json"])
+            score = float(r["best_score"] or 0.0)
+            relevance = 0.0
+            if hero and hero in heroes:
+                relevance += 1.0
+            if mistake_types:
+                overlap = set(concepts) & set(mistake_types)
+                relevance += 0.5 * len(overlap)
+            if relevance == 0.0:
+                continue
+            scored.append((
+                score + relevance,
+                {
+                    "text": r["text"],
+                    "source": r["source"],
+                    "title": r["title"] or "",
+                    "timestamp": float(r["start_seconds"]),
+                    "heroes": heroes,
+                    "concepts": concepts,
+                    "correlation_score": score,
+                },
+            ))
+        scored.sort(key=lambda kv: kv[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    if conn is not None:
+        return _do(conn)
+    with db_session() as c:
+        return _do(c)
+
+
 def get_comp_performance(your_comp: str, conn: Optional[sqlite3.Connection] = None) -> dict:
     def _do(c: sqlite3.Connection) -> dict:
         cur = c.execute("SELECT deaths, ult_efficiency_score FROM sessions WHERE your_comp = ?", (your_comp,))
