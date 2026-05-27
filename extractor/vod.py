@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+# time is used by transcribe() for progress logging
+
 import config
 from extractor.events import SessionEvents
 from knowledge.overwatch import HERO_COACHING
@@ -114,7 +116,10 @@ def transcribe(video_path: Path, model_size: str = "base") -> list[TranscriptSeg
     """Run Whisper on the video's audio track. Returns timestamped segments.
 
     First call downloads the model (~150MB for 'base'). Requires ffmpeg
-    installed system-wide (brew install ffmpeg on Mac)."""
+    installed system-wide (brew install ffmpeg on Mac).
+
+    Logs progress every 50 segments and every ~30 seconds of audio processed
+    so long files do not look hung."""
 
     try:
         from faster_whisper import WhisperModel
@@ -126,11 +131,23 @@ def transcribe(video_path: Path, model_size: str = "base") -> list[TranscriptSeg
     log.info("Loading Whisper model '%s' (first run downloads ~150MB)", model_size)
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     log.info("Transcribing %s ...", video_path)
+    start = time.monotonic()
     segments_gen, info = model.transcribe(str(video_path), beam_size=1)
+    duration = float(getattr(info, "duration", 0.0))
+    log.info("Audio duration: %.0fs, language=%s", duration, info.language)
     segments: list[TranscriptSegment] = []
+    last_log_at = 0.0
     for seg in segments_gen:
         segments.append(TranscriptSegment(start=float(seg.start), end=float(seg.end), text=seg.text.strip()))
-    log.info("Transcript: %d segments, language=%s", len(segments), info.language)
+        elapsed = time.monotonic() - start
+        if len(segments) % 50 == 0 or (elapsed - last_log_at) > 30.0:
+            pct = (100.0 * float(seg.end) / duration) if duration else 0.0
+            log.info(
+                "Transcribe: %d segments, audio pos %.0fs/%.0fs (%.0f%%), %.0fs elapsed",
+                len(segments), float(seg.end), duration, pct, elapsed,
+            )
+            last_log_at = elapsed
+    log.info("Transcript complete: %d segments, %.0fs to process", len(segments), time.monotonic() - start)
     return segments
 
 

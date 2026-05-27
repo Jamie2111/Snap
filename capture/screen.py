@@ -179,6 +179,8 @@ def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
     auto-resized to 1920x1080 to match the HUD region coords, so YouTube
     downloads at any resolution work as long as the underlying gameplay was
     recorded at 16:9 with the default HUD.
+
+    Logs a progress line every ~10 percent so long videos do not look hung.
     """
     import cv2
 
@@ -192,7 +194,10 @@ def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
         "Video %s: %.1f fps, %d frames, sampling every %d frame(s)",
         video_path, video_fps, total_frames, skip,
     )
+    progress_every = max(1, total_frames // 10) if total_frames else 0
+    start = time.monotonic()
     frame_idx = 0
+    sampled = 0
     try:
         while True:
             ret, frame = cap.read()
@@ -206,7 +211,16 @@ def video_iter(video_path: Path, fps: int = 2) -> Iterator[CaptureFrame]:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 ts = frame_idx / video_fps
                 yield CaptureFrame(timestamp=ts, frame=frame_rgb, in_focus=True)
+                sampled += 1
             frame_idx += 1
+            if progress_every and frame_idx % progress_every == 0:
+                pct = 100.0 * frame_idx / total_frames
+                elapsed = time.monotonic() - start
+                eta = elapsed * (total_frames - frame_idx) / max(frame_idx, 1)
+                log.info(
+                    "Video pass: %d / %d frames (%.0f%%), %d sampled, %.0fs elapsed, ~%.0fs remaining",
+                    frame_idx, total_frames, pct, sampled, elapsed, eta,
+                )
     finally:
         cap.release()
 
