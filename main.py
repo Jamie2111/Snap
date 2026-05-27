@@ -46,83 +46,129 @@ def _prompt_initial_hero() -> Optional[str]:
 
 
 def run_demo() -> None:
-    from extractor.events import EventDetector
+    """Three synthetic matches across different maps and enemies. Exercises
+    the multi-match pipeline end-to-end without needing real OW2 footage."""
+
     from extractor.game_state import GameState
     from extractor.match_context import MatchContext
-    from feedback.engine import generate
+    from extractor.match_tracker import Match
+    from extractor.events import EventDetector, SessionEvents
+    from feedback.engine import generate_for_matches
     from memory import database, player_profile
     from ui.report import render, write_markdown
 
-    console.print("[bold cyan]Snap[/]: running demo session")
+    console.print("[bold cyan]Snap[/]: running demo session (3 matches)")
 
-    states: list[GameState] = []
-    ts = 0.0
-    # Setup: walking around, ult charging
-    for _ in range(60):
-        states.append(GameState(timestamp=ts, health_pct=1.0, ult_pct=min(0.95, ts / 80.0), cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
-        ts += 1
-    # First fight: engage at full hp, ult almost full, abilities ready
-    fight_start = ts
-    for _ in range(8):
-        states.append(GameState(timestamp=ts, health_pct=0.80 - (ts - fight_start) / 20.0, ult_pct=0.95, fight_intensity=0.25, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
-        ts += 1
-    # Death with ult still 95 percent
-    states.append(GameState(timestamp=ts, health_pct=0.0, ult_pct=0.95, in_death_screen=True, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
-    ts += 5
-    # Respawn, fight again later
-    for _ in range(40):
-        states.append(GameState(timestamp=ts, health_pct=1.0, ult_pct=0.30, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
-        ts += 1
-    fight2 = ts
-    for _ in range(6):
-        states.append(GameState(timestamp=ts, health_pct=0.45, ult_pct=0.40, fight_intensity=0.30, cooldowns={"ability_1": "ready", "ability_2": "cooldown", "ability_3": "ready", "ability_4": "ready"}))
-        ts += 1
-    # Survive this one
-    for _ in range(10):
-        states.append(GameState(timestamp=ts, health_pct=0.80, ult_pct=0.45, fight_intensity=0.05))
-        ts += 1
+    def _build_match(idx: int, *, map_name: str, hero: str, enemies: list[str],
+                     comp: str, result: str, with_ult_death: bool = False,
+                     aim_on_target: int = 0, aim_total: int = 0) -> Match:
+        det = EventDetector()
+        ts = 0.0
+        states: list[GameState] = []
+        for _ in range(30):
+            states.append(GameState(timestamp=ts, health_pct=1.0, ult_pct=0.5, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
+            ts += 1
+        if with_ult_death:
+            for _ in range(6):
+                states.append(GameState(timestamp=ts, health_pct=0.6, ult_pct=1.0, fight_intensity=0.25, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
+                ts += 1
+            states.append(GameState(timestamp=ts, health_pct=0.0, ult_pct=1.0, in_death_screen=True, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
+            ts += 5
+        else:
+            for _ in range(15):
+                states.append(GameState(timestamp=ts, health_pct=0.8, ult_pct=0.4, fight_intensity=0.10, cooldowns={a: "ready" for a in config.ABILITY_SLOTS}))
+                ts += 1
+        for s in states:
+            det.ingest(s)
+        events = det.finalize()
+        events.stats.aim_frames_with_enemy = aim_total
+        events.stats.aim_frames_on_target = aim_on_target
+        events.stats.aim_avg_miss_px = 67.0 if aim_total else 0.0
+        events.stats.ability_glow_counts = {"dragonblade": 4} if with_ult_death else {}
+        match = Match(
+            match_index=idx,
+            started_at=0.0,
+            ended_at=ts,
+            map_name=map_name,
+            result=result,
+            events=events,
+            match_context=MatchContext(
+                your_hero=hero,
+                allies=["ana", "lucio", "reinhardt", "zarya"],
+                enemies=enemies,
+                your_comp=comp,
+                enemy_comp="brawl",
+            ),
+        )
+        return match
 
-    det = EventDetector()
-    for s in states:
-        det.ingest(s)
-    events = det.finalize()
-    # Synthetic mechanics data so the demo shows the Mechanics panel.
-    events.stats.aim_frames_with_enemy = 240
-    events.stats.aim_frames_on_target = 41
-    events.stats.aim_avg_miss_px = 67.2
-    events.stats.aim_near_misses = 88
-    events.stats.ability_glow_counts = {"dragonblade": 14, "nano_boost": 6}
-    events.stats.screen_flash_count = 9
-
-    match = MatchContext(
-        your_hero="tracer",
-        allies=["ana", "lucio", "reinhardt", "zarya"],
-        enemies=["mercy", "kiriko", "reinhardt", "zarya", "brigitte"],
-        your_comp="hybrid",
-        enemy_comp="brawl",
-        map_name="Ilios",
-    )
+    matches = [
+        _build_match(
+            1, map_name="Ilios", hero="tracer",
+            enemies=["mercy", "kiriko", "reinhardt", "zarya", "brigitte"],
+            comp="hybrid", result="loss", with_ult_death=True,
+            aim_on_target=58, aim_total=240,
+        ),
+        _build_match(
+            2, map_name="King's Row", hero="tracer",
+            enemies=["mercy", "ana", "reinhardt", "zarya", "soldier76"],
+            comp="hybrid", result="win",
+            aim_on_target=92, aim_total=210,
+        ),
+        _build_match(
+            3, map_name="Numbani", hero="ana",
+            enemies=["winston", "kiriko", "tracer", "reaper", "lucio"],
+            comp="brawl", result="loss", with_ult_death=True,
+            aim_on_target=33, aim_total=180,
+        ),
+    ]
 
     conn = database.connect()
-    feedback = generate(events, match, db_conn=conn)
+    feedback = generate_for_matches(matches, db_conn=conn)
     session_id = uuid.uuid4().hex[:12]
+    ctx = feedback.match_context
     player_profile.write_session(
         session_id=session_id,
         timestamp=time.time(),
-        hero=match.your_hero,
-        duration_minutes=ts / 60.0,
-        deaths=events.stats.deaths_total,
+        hero=ctx.your_hero if ctx else None,
+        duration_minutes=sum(m.duration_seconds for m in matches) / 60.0,
+        deaths=feedback.session_summary.deaths,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"deaths": events.stats.deaths_total},
+        raw_event={"matches": len(matches)},
         feedback_given={"critical": [c.issue for c in feedback.critical]},
-        allies=match.allies,
-        enemies=match.enemies,
-        your_comp=match.your_comp,
-        enemy_comp=match.enemy_comp,
-        map_name=match.map_name,
+        allies=ctx.allies if ctx else [],
+        enemies=ctx.enemies if ctx else [],
+        your_comp=ctx.your_comp if ctx else None,
+        enemy_comp=ctx.enemy_comp if ctx else None,
         conn=conn,
     )
-    player_profile.write_mistakes_from_events(session_id, events, conn=conn)
+    for m, mf in zip(matches, feedback.matches):
+        player_profile.write_match(
+            session_id=session_id,
+            match_index=m.match_index,
+            started_at=m.started_at,
+            ended_at=m.ended_at,
+            duration_seconds=m.duration_seconds,
+            map_name=m.map_name,
+            result=m.result,
+            hero=m.match_context.your_hero,
+            allies=list(m.match_context.allies),
+            enemies=list(m.match_context.enemies),
+            your_comp=m.match_context.your_comp,
+            enemy_comp=m.match_context.enemy_comp,
+            deaths=m.events.stats.deaths_total,
+            ult_efficiency_score=mf.session_summary.ult_efficiency_score,
+            aim_on_target_pct=(
+                m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy
+                if m.events.stats.aim_frames_with_enemy else 0.0
+            ),
+            raw_event={"events": m.events.stats.deaths_total},
+            feedback_given={"critical": [c.issue for c in mf.critical]},
+            conn=conn,
+        )
+    from extractor.match_tracker import aggregate_session_stats
+    agg = aggregate_session_stats(matches)
+    player_profile.write_mistakes_from_events(session_id, agg, conn=conn)
     player_profile.update_player_model(session_id, conn=conn)
 
     render(feedback, console=console)
@@ -136,28 +182,23 @@ def _run_offline_pipeline(
     initial_hero: Optional[str] = None,
 ) -> None:
     """Common pipeline for offline modes (--replay, --video). Iterates frames,
-    extracts state per frame, runs the hero observer (pick screen / spawn room
-    / scoreboard OCR), runs the vision pipeline for aim + ability outcomes,
-    detects events, generates feedback, renders + saves the report."""
+    runs match-boundary detectors and per-match event detection, runs the
+    vision pipeline for aim + ability outcomes, generates per-match + session
+    feedback, renders the report."""
 
     from collections import Counter
 
     from extractor.aim import AimTracker
-    from extractor.events import EventDetector
     from extractor.game_state import extract_state
-    from extractor.match_context import MatchContextTracker
+    from extractor.match_tracker import MatchTracker
     from extractor.vision import VisionPipeline
-    from feedback.engine import generate
+    from feedback.engine import generate_for_matches
     from memory import database, player_profile
     from ui.report import render, write_markdown
 
     console.print(f"[bold cyan]Snap[/]: {source_label}")
 
-    tracker = MatchContextTracker()
-    if initial_hero:
-        tracker.set_initial_hero(initial_hero)
-
-    det = EventDetector()
+    tracker = MatchTracker(initial_hero=initial_hero)
     vision = VisionPipeline()
     aim = AimTracker()
     ability_glow_counts: Counter = Counter()
@@ -166,14 +207,18 @@ def _run_offline_pipeline(
     frames_processed = 0
     for cf in frame_source:
         try:
+            tracker.ingest_frame(cf.frame, cf.timestamp)
+        except Exception:
+            log.exception("match-tracker frame ingest failed")
+        try:
             state = extract_state(cf.frame, cf.timestamp, health_history)
         except Exception:
             log.exception("extract_state failed on frame %d", frames_processed)
             continue
         health_history.append(state.health_pct)
-        det.ingest(state)
+        tracker.ingest_state(state)
         try:
-            tracker.observe_frame(cf.frame)
+            tracker.observe_frame_for_hero(cf.frame)
         except Exception:
             log.exception("hero-observation pass failed on frame %d", frames_processed)
         try:
@@ -186,42 +231,71 @@ def _run_offline_pipeline(
         except Exception:
             log.exception("vision pass failed on frame %d", frames_processed)
         frames_processed += 1
-    events = det.finalize()
+
+    matches = tracker.finalize()
     aim_m = aim.snapshot()
-    events.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
-    events.stats.aim_frames_on_target = aim_m.frames_on_target
-    events.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
-    events.stats.aim_near_misses = aim_m.near_misses
-    events.stats.ability_glow_counts = dict(ability_glow_counts)
-    events.stats.screen_flash_count = screen_flash_count
-    match = tracker.context
+    if matches:
+        last = matches[-1]
+        last.events.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
+        last.events.stats.aim_frames_on_target = aim_m.frames_on_target
+        last.events.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
+        last.events.stats.aim_near_misses = aim_m.near_misses
+        last.events.stats.ability_glow_counts = dict(ability_glow_counts)
+        last.events.stats.screen_flash_count = screen_flash_count
 
     conn = database.connect()
-    feedback = generate(events, match, db_conn=conn)
+    feedback = generate_for_matches(matches, db_conn=conn)
     session_id = uuid.uuid4().hex[:12]
     player_profile.write_session(
         session_id=session_id,
         timestamp=time.time(),
-        hero=match.your_hero,
-        duration_minutes=0.0,
-        deaths=events.stats.deaths_total,
+        hero=feedback.match_context.your_hero if feedback.match_context else None,
+        duration_minutes=sum(m.duration_seconds for m in matches) / 60.0,
+        deaths=feedback.session_summary.deaths,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"frames": frames_processed},
+        raw_event={"frames": frames_processed, "matches": len(matches)},
         feedback_given={"critical": [c.issue for c in feedback.critical]},
-        allies=match.allies,
-        enemies=match.enemies,
-        your_comp=match.your_comp,
-        enemy_comp=match.enemy_comp,
+        allies=feedback.match_context.allies if feedback.match_context else [],
+        enemies=feedback.match_context.enemies if feedback.match_context else [],
+        your_comp=feedback.match_context.your_comp if feedback.match_context else None,
+        enemy_comp=feedback.match_context.enemy_comp if feedback.match_context else None,
         conn=conn,
     )
-    player_profile.write_mistakes_from_events(session_id, events, conn=conn)
+    for m, mf in zip(matches, feedback.matches):
+        player_profile.write_match(
+            session_id=session_id,
+            match_index=m.match_index,
+            started_at=m.started_at,
+            ended_at=m.ended_at,
+            duration_seconds=m.duration_seconds,
+            map_name=m.map_name,
+            result=m.result,
+            hero=m.match_context.your_hero,
+            allies=list(m.match_context.allies),
+            enemies=list(m.match_context.enemies),
+            your_comp=m.match_context.your_comp,
+            enemy_comp=m.match_context.enemy_comp,
+            deaths=m.events.stats.deaths_total,
+            ult_efficiency_score=mf.session_summary.ult_efficiency_score,
+            aim_on_target_pct=(
+                m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy
+                if m.events.stats.aim_frames_with_enemy else 0.0
+            ),
+            raw_event={"events": m.events.stats.deaths_total},
+            feedback_given={"critical": [c.issue for c in mf.critical]},
+            conn=conn,
+        )
+    from extractor.match_tracker import aggregate_session_stats
+    agg = aggregate_session_stats(matches)
+    player_profile.write_mistakes_from_events(session_id, agg, conn=conn)
     player_profile.update_player_model(session_id, conn=conn)
 
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
-    console.print(f"\n[dim]Processed {frames_processed} frames. Markdown report: {md_path}[/]")
-
-
+    console.print(
+        f"\n[dim]Processed {frames_processed} frames across {len(matches)} match(es). "
+        f"Markdown report: {md_path}[/]"
+    )
 def run_replay(replay_dir: Path, initial_hero: Optional[str] = None) -> None:
     from capture.screen import replay_iter
 
@@ -397,16 +471,13 @@ def _capture_worker(
     from collections import Counter
     from capture.screen import live_capture, write_session_manifest
     from extractor.aim import AimTracker
-    from extractor.events import EventDetector
     from extractor.game_state import extract_state
-    from extractor.match_context import MatchContextTracker
+    from extractor.match_tracker import MatchTracker
     from extractor.vision import VisionPipeline
 
-    tracker = MatchContextTracker()
+    tracker = MatchTracker(initial_hero=result.get("initial_hero"))
     if result.get("initial_hero"):
-        tracker.set_initial_hero(result["initial_hero"])
         state.set_hero(result["initial_hero"])
-    det = EventDetector()
     vision = VisionPipeline()
     aim = AimTracker()
     ability_glow_counts: Counter = Counter()
@@ -446,14 +517,18 @@ def _capture_worker(
             record = rec
             state.tick_frame()
             try:
+                tracker.ingest_frame(cf.frame, cf.timestamp)
+            except Exception:
+                log.exception("match-tracker frame ingest failed")
+            try:
                 gs = extract_state(cf.frame, cf.timestamp, health_history)
             except Exception:
                 log.exception("extract_state failed")
                 continue
             health_history.append(gs.health_pct)
-            det.ingest(gs)
+            tracker.ingest_state(gs)
             try:
-                observed = tracker.observe_frame(cf.frame)
+                observed = tracker.observe_frame_for_hero(cf.frame)
                 if observed:
                     state.record_event(f"hero confirmed: {observed}")
             except Exception:
@@ -467,23 +542,24 @@ def _capture_worker(
                     screen_flash_count += 1
             except Exception:
                 log.exception("vision pass failed")
-            ctx = tracker.context
-            if ctx.your_hero:
-                state.set_hero(ctx.your_hero)
-            if ctx.allies:
-                state.set_allies(list(ctx.allies))
-            if ctx.enemies:
-                state.set_enemies(list(ctx.enemies))
-            stats = det.events.stats
-            if stats.deaths_total > prev_death_count:
-                state.record_event("Death", death=True)
-                prev_death_count = stats.deaths_total
-            if stats.ults_used > prev_ults_used:
-                state.record_event("Ult used", ult_used=True)
-                prev_ults_used = stats.ults_used
-            if stats.ults_wasted > prev_ults_wasted:
-                state.record_event("Ult wasted", ult_wasted=True)
-                prev_ults_wasted = stats.ults_wasted
+            cur_match = tracker._current_match
+            if cur_match is not None and cur_match.match_context.your_hero:
+                state.set_hero(cur_match.match_context.your_hero)
+            if cur_match is not None and cur_match.match_context.allies:
+                state.set_allies(list(cur_match.match_context.allies))
+            if cur_match is not None and cur_match.match_context.enemies:
+                state.set_enemies(list(cur_match.match_context.enemies))
+            if tracker._current_detector is not None:
+                stats = tracker._current_detector.events.stats
+                if stats.deaths_total > prev_death_count:
+                    state.record_event("Death", death=True)
+                    prev_death_count = stats.deaths_total
+                if stats.ults_used > prev_ults_used:
+                    state.record_event("Ult used", ult_used=True)
+                    prev_ults_used = stats.ults_used
+                if stats.ults_wasted > prev_ults_wasted:
+                    state.record_event("Ult wasted", ult_wasted=True)
+                    prev_ults_wasted = stats.ults_wasted
             push_overlay()
             if duration_seconds and (time.monotonic() - start_time) >= duration_seconds:
                 stopped_reason = "duration_reached"
@@ -494,16 +570,17 @@ def _capture_worker(
     finally:
         state.stop()
         push_overlay()
-        events_final = det.finalize()
+        matches_final = tracker.finalize()
         aim_m = aim.snapshot()
-        events_final.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
-        events_final.stats.aim_frames_on_target = aim_m.frames_on_target
-        events_final.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
-        events_final.stats.aim_near_misses = aim_m.near_misses
-        events_final.stats.ability_glow_counts = dict(ability_glow_counts)
-        events_final.stats.screen_flash_count = screen_flash_count
-        result["events"] = events_final
-        result["match"] = tracker.context
+        if matches_final:
+            last = matches_final[-1]
+            last.events.stats.aim_frames_with_enemy = aim_m.frames_with_enemy_in_sight
+            last.events.stats.aim_frames_on_target = aim_m.frames_on_target
+            last.events.stats.aim_avg_miss_px = round(aim_m.avg_miss_distance, 1)
+            last.events.stats.aim_near_misses = aim_m.near_misses
+            last.events.stats.ability_glow_counts = dict(ability_glow_counts)
+            last.events.stats.screen_flash_count = screen_flash_count
+        result["matches"] = matches_final
         result["session_dir"] = session_dir
         result["record"] = record
         result["stopped_reason"] = stopped_reason
@@ -584,15 +661,7 @@ def run_live(
             except Exception:
                 pass
 
-    events = result.get("events")
-    match = result.get("match")
-    if events is None or match is None:
-        console.print(
-            "[bold red]No frames captured.[/] "
-            "If you're on macOS, grant Screen Recording permission in "
-            "System Settings > Privacy & Security > Screen Recording, then restart your terminal."
-        )
-        return
+    matches = result.get("matches") or []
     if state.snapshot().frames_seen == 0:
         console.print(
             "[bold red]No frames captured.[/] "
@@ -601,34 +670,64 @@ def run_live(
         )
         return
 
-    if initial and not match.your_hero:
-        match.your_hero = initial
+    from feedback.engine import generate_for_matches
+    from extractor.match_tracker import aggregate_session_stats
 
     conn = database.connect()
-    feedback = generate(events, match, db_conn=conn)
+    feedback = generate_for_matches(matches, db_conn=conn)
     record = result.get("record")
     session_id = record.session_id if record else uuid.uuid4().hex[:12]
+    ctx = feedback.match_context
     player_profile.write_session(
         session_id=session_id,
         timestamp=time.time(),
-        hero=match.your_hero,
+        hero=ctx.your_hero if ctx else None,
         duration_minutes=(record.end_time - record.start_time) / 60.0 if record and record.end_time else 0.0,
-        deaths=events.stats.deaths_total,
+        deaths=feedback.session_summary.deaths,
         ult_efficiency_score=feedback.session_summary.ult_efficiency_score,
-        raw_event={"frames": state.snapshot().frames_seen, "stopped_reason": result.get("stopped_reason")},
+        raw_event={
+            "frames": state.snapshot().frames_seen,
+            "matches": len(matches),
+            "stopped_reason": result.get("stopped_reason"),
+        },
         feedback_given={"critical": [c.issue for c in feedback.critical]},
-        allies=match.allies,
-        enemies=match.enemies,
-        your_comp=match.your_comp,
-        enemy_comp=match.enemy_comp,
+        allies=ctx.allies if ctx else [],
+        enemies=ctx.enemies if ctx else [],
+        your_comp=ctx.your_comp if ctx else None,
+        enemy_comp=ctx.enemy_comp if ctx else None,
         conn=conn,
     )
-    player_profile.write_mistakes_from_events(session_id, events, conn=conn)
+    for m, mf in zip(matches, feedback.matches):
+        player_profile.write_match(
+            session_id=session_id,
+            match_index=m.match_index,
+            started_at=m.started_at,
+            ended_at=m.ended_at,
+            duration_seconds=m.duration_seconds,
+            map_name=m.map_name,
+            result=m.result,
+            hero=m.match_context.your_hero,
+            allies=list(m.match_context.allies),
+            enemies=list(m.match_context.enemies),
+            your_comp=m.match_context.your_comp,
+            enemy_comp=m.match_context.enemy_comp,
+            deaths=m.events.stats.deaths_total,
+            ult_efficiency_score=mf.session_summary.ult_efficiency_score,
+            aim_on_target_pct=(
+                m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy
+                if m.events.stats.aim_frames_with_enemy else 0.0
+            ),
+            raw_event={"events": m.events.stats.deaths_total},
+            feedback_given={"critical": [c.issue for c in mf.critical]},
+            conn=conn,
+        )
+    agg = aggregate_session_stats(matches)
+    player_profile.write_mistakes_from_events(session_id, agg, conn=conn)
     player_profile.update_player_model(session_id, conn=conn)
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
     console.print(
-        f"\n[dim]Processed {state.snapshot().frames_seen} frames "
+        f"\n[dim]Processed {state.snapshot().frames_seen} frames across {len(matches)} match(es) "
         f"({result.get('stopped_reason')}). Markdown report: {md_path}[/]"
     )
     if result.get("session_dir") is not None and record is not None:

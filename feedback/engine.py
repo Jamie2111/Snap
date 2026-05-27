@@ -74,6 +74,20 @@ class MechanicsItem:
 
 
 @dataclass
+class MatchSummary:
+    """Summary card for one match within a multi-match session."""
+    match_index: int
+    map_name: Optional[str]
+    result: str
+    duration_minutes: float
+    hero: Optional[str]
+    enemies: list[str]
+    deaths: int
+    ult_efficiency_score: int
+    aim_on_target_pct: float
+
+
+@dataclass
 class Feedback:
     session_summary: SessionSummary
     critical: list[CriticalFeedback] = field(default_factory=list)
@@ -84,6 +98,8 @@ class Feedback:
     one_thing_to_focus_on: str = ""
     progress_acknowledgment: str = ""
     match_context: Optional[MatchContext] = None
+    matches: list["Feedback"] = field(default_factory=list)
+    match_summaries: list[MatchSummary] = field(default_factory=list)
 
 
 def _score_ult_efficiency(events: SessionEvents) -> int:
@@ -418,6 +434,54 @@ def _mechanics(events: SessionEvents) -> list[MechanicsItem]:
             interpretation="Either you used this ult or an enemy did; useful for ult-economy review.",
         ))
     return out
+
+
+def generate_for_matches(
+    matches: list,
+    db_conn: Optional[sqlite3.Connection] = None,
+) -> Feedback:
+    """Multi-match session feedback. Generates per-match Feedback objects plus
+    an aggregated session-overview Feedback that contains MatchSummary cards
+    for the UI to render."""
+
+    from extractor.match_tracker import Match, aggregate_session_stats
+
+    per_match: list[Feedback] = []
+    summaries: list[MatchSummary] = []
+    for m in matches:
+        fb = generate(m.events, m.match_context, db_conn=db_conn)
+        per_match.append(fb)
+        aim_pct = (
+            fb.session_summary.ult_efficiency_score  # placeholder if no aim data
+            if not m.events.stats.aim_frames_with_enemy
+            else round(100.0 * m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy)
+        )
+        summaries.append(MatchSummary(
+            match_index=m.match_index,
+            map_name=m.map_name,
+            result=m.result,
+            duration_minutes=round(m.duration_seconds / 60.0, 1),
+            hero=m.match_context.your_hero,
+            enemies=list(m.match_context.enemies),
+            deaths=m.events.stats.deaths_total,
+            ult_efficiency_score=fb.session_summary.ult_efficiency_score,
+            aim_on_target_pct=(
+                m.events.stats.aim_frames_on_target / m.events.stats.aim_frames_with_enemy
+                if m.events.stats.aim_frames_with_enemy else 0.0
+            ),
+        ))
+
+    # Aggregate stats for a session-level overview.
+    agg_events = aggregate_session_stats(matches)
+    if matches:
+        # Use the most-recent match's context for session-level synergies/insights.
+        recent_ctx = matches[-1].match_context
+    else:
+        recent_ctx = MatchContext()
+    session_fb = generate(agg_events, recent_ctx, db_conn=db_conn)
+    session_fb.matches = per_match
+    session_fb.match_summaries = summaries
+    return session_fb
 
 
 def _coach_quotes(hero: Optional[str], mistake_types: list[str], db_conn) -> list[CoachQuote]:

@@ -113,6 +113,78 @@ def _coach_panel(fb: Feedback) -> Optional[Panel]:
     return Panel("\n\n".join(blocks), title="Coach Said", border_style="cyan", box=ROUNDED)
 
 
+def _matches_overview_panel(fb: Feedback) -> Optional[Panel]:
+    """Compact table of every match in the session, one row each."""
+    if not fb.match_summaries:
+        return None
+    table = Table.grid(padding=(0, 2))
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Map")
+    table.add_column("Result")
+    table.add_column("Hero")
+    table.add_column("Enemies", overflow="fold")
+    table.add_column("Deaths", justify="right")
+    table.add_column("Ult", justify="right")
+    table.add_column("Aim", justify="right")
+    for s in fb.match_summaries:
+        result_color = {
+            "win": "green", "loss": "red", "draw": "yellow",
+            "abandoned": "dim", "unknown": "dim",
+        }.get(s.result, "dim")
+        table.add_row(
+            str(s.match_index),
+            (s.map_name or "(unknown)").title(),
+            f"[{result_color}]{s.result.upper()}[/]",
+            (s.hero or "—").title(),
+            ", ".join(e.title() for e in s.enemies[:3]) + (" ..." if len(s.enemies) > 3 else ""),
+            str(s.deaths),
+            f"{s.ult_efficiency_score}",
+            f"{s.aim_on_target_pct:.0%}" if s.aim_on_target_pct else "—",
+        )
+    return Panel(table, title=f"Matches Played ({len(fb.match_summaries)})", border_style="cyan", box=ROUNDED)
+
+
+def _per_match_panels(fb: Feedback) -> list[Panel]:
+    """One Panel per match with its critical / mechanics / focus content."""
+    out: list[Panel] = []
+    if not fb.matches:
+        return out
+    for summary, match_fb in zip(fb.match_summaries, fb.matches):
+        lines: list[str] = []
+        result_color = {
+            "win": "green", "loss": "red", "draw": "yellow",
+        }.get(summary.result, "dim")
+        header = (
+            f"[bold]{(summary.map_name or '?').title()}[/]  "
+            f"[{result_color}]{summary.result.upper()}[/]  "
+            f"[dim]{summary.duration_minutes:.1f} min[/]\n"
+            f"[bold]Hero:[/] {(summary.hero or '?').title()}  "
+            f"[bold]Deaths:[/] {summary.deaths}  "
+            f"[bold]Ult:[/] {summary.ult_efficiency_score}/100"
+        )
+        lines.append(header)
+        if match_fb.critical:
+            lines.append("")
+            lines.append("[red bold]Critical[/]")
+            for c in match_fb.critical[:2]:
+                lines.append(f"  ● {c.render()}")
+        if match_fb.mechanics:
+            lines.append("")
+            lines.append("[blue bold]Mechanics[/]")
+            for m in match_fb.mechanics[:2]:
+                lines.append(f"  ● {m.metric}: {m.value}")
+        if match_fb.one_thing_to_focus_on:
+            lines.append("")
+            lines.append("[green bold]Focus next:[/] " + match_fb.one_thing_to_focus_on)
+        out.append(Panel(
+            "\n".join(lines),
+            title=f"Match {summary.match_index}",
+            border_style="cyan",
+            box=ROUNDED,
+        ))
+    return out
+
+
 def _focus_panel(fb: Feedback) -> Panel:
     text = Text(fb.one_thing_to_focus_on or "", style="bold")
     if fb.progress_acknowledgment:
@@ -125,6 +197,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
     console = console or Console()
     panels = [p for p in (
         _summary_panel(fb),
+        _matches_overview_panel(fb),
         _context_panel(fb),
         _critical_panel(fb),
         _improvement_panel(fb),
@@ -133,6 +206,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
         _coach_panel(fb),
         _focus_panel(fb),
     ) if p is not None]
+    panels.extend(_per_match_panels(fb))
     console.rule("[bold cyan]SNAP  Session Report")
     for p in panels:
         console.print(p)

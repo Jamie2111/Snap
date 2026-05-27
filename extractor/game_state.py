@@ -179,6 +179,52 @@ def detect_spawn_room_visible(frame: np.ndarray) -> bool:
     return bool(bright > 0.10)
 
 
+def detect_victory_screen(frame: np.ndarray) -> bool:
+    """OW2 victory banner: center-of-screen large gold/orange text on darker
+    backdrop. Uses HSV gold range to disambiguate from random bright UI."""
+
+    crop = regions.crop_named(frame, "result_banner")
+    if crop.size == 0:
+        return False
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    # Gold/orange hue 15-35, saturated, bright
+    gold_mask = cv2.inRange(hsv, np.array([15, 100, 180]), np.array([35, 255, 255]))
+    gold_pct = float(np.count_nonzero(gold_mask)) / float(gold_mask.size)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    bright_text = np.count_nonzero(gray > 220) / gray.size
+    return bool(gold_pct > 0.03 and bright_text > 0.05)
+
+
+def detect_defeat_screen(frame: np.ndarray) -> bool:
+    """OW2 defeat banner: center-of-screen large red text on darker backdrop."""
+
+    crop = regions.crop_named(frame, "result_banner")
+    if crop.size == 0:
+        return False
+    hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+    # Red hue at both ends of the HSV ring
+    red_mask = cv2.inRange(hsv, np.array([0, 120, 150]), np.array([10, 255, 255]))
+    red_mask |= cv2.inRange(hsv, np.array([170, 120, 150]), np.array([180, 255, 255]))
+    red_pct = float(np.count_nonzero(red_mask)) / float(red_mask.size)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    bright_text = np.count_nonzero(gray > 200) / gray.size
+    return bool(red_pct > 0.03 and bright_text > 0.04)
+
+
+def detect_pregame_splash(frame: np.ndarray) -> bool:
+    """OW2 pregame map intro card: large central card with the map name and
+    game mode (Attack / Defend / Push / Control). Distinctive layout: very
+    dark backdrop with bright readable text."""
+
+    crop = regions.crop_named(frame, "pregame_splash_signature")
+    if crop.size == 0:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    very_dark = np.count_nonzero(gray < 40) / gray.size
+    bright_text = np.count_nonzero(gray > 200) / gray.size
+    return bool(very_dark > 0.55 and bright_text > 0.04)
+
+
 def fight_intensity_from_history(health_history: list[float], window: int = 4) -> float:
     if len(health_history) < 2:
         return 0.0

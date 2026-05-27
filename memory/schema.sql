@@ -52,6 +52,32 @@ CREATE TABLE IF NOT EXISTS player_model (
 
 INSERT OR IGNORE INTO player_model (id, updated_at) VALUES (1, 0.0);
 
+CREATE TABLE IF NOT EXISTS matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    match_index INTEGER NOT NULL,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    map_name TEXT,
+    result TEXT NOT NULL DEFAULT 'unknown',
+    hero TEXT,
+    allies_json TEXT NOT NULL DEFAULT '[]',
+    enemies_json TEXT NOT NULL DEFAULT '[]',
+    your_comp TEXT,
+    enemy_comp TEXT,
+    deaths INTEGER NOT NULL DEFAULT 0,
+    ult_efficiency_score INTEGER NOT NULL DEFAULT 0,
+    aim_on_target_pct REAL NOT NULL DEFAULT 0.0,
+    raw_event_json TEXT NOT NULL DEFAULT '{}',
+    feedback_given_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_matches_session ON matches(session_id);
+CREATE INDEX IF NOT EXISTS idx_matches_hero ON matches(hero);
+CREATE INDEX IF NOT EXISTS idx_matches_map ON matches(map_name);
+
 CREATE TABLE IF NOT EXISTS vod_reviews (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,

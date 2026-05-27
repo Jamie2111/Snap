@@ -67,6 +67,12 @@ CAPTURE_REGIONS_1080P: dict[str, tuple[int, int, int, int]] = {
 
     "minimap": (40, 40, 220, 220),
     "map_name_pregame": (760, 200, 400, 120),
+
+    # Match-boundary detectors.
+    # Victory / Defeat banner: large center-of-screen text block during post-match.
+    "result_banner": (560, 380, 800, 240),
+    # Pregame splash card: large map intro with "ATTACK" / "DEFEND" / "PUSH" text.
+    "pregame_splash_signature": (560, 180, 800, 220),
 }
 
 SCOREBOARD_ROW_HEIGHT_1080P = 72

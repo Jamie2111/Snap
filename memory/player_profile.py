@@ -79,6 +79,92 @@ def write_session(
         )
 
 
+def write_match(
+    session_id: str,
+    match_index: int,
+    started_at: float,
+    ended_at: Optional[float],
+    duration_seconds: float,
+    map_name: Optional[str],
+    result: str,
+    hero: Optional[str],
+    allies: list[str],
+    enemies: list[str],
+    your_comp: Optional[str],
+    enemy_comp: Optional[str],
+    deaths: int,
+    ult_efficiency_score: int,
+    aim_on_target_pct: float,
+    raw_event: dict,
+    feedback_given: dict,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    payload = (
+        session_id, match_index, started_at, ended_at, duration_seconds, map_name, result,
+        hero, _json(allies), _json(enemies), your_comp, enemy_comp,
+        deaths, ult_efficiency_score, aim_on_target_pct,
+        _json(raw_event), _json(feedback_given),
+    )
+
+    def _do(c: sqlite3.Connection) -> None:
+        c.execute(
+            """INSERT INTO matches (
+                session_id, match_index, started_at, ended_at, duration_seconds, map_name, result,
+                hero, allies_json, enemies_json, your_comp, enemy_comp,
+                deaths, ult_efficiency_score, aim_on_target_pct,
+                raw_event_json, feedback_given_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            payload,
+        )
+
+    if conn is not None:
+        _do(conn)
+        conn.commit()
+        return
+    with db_session() as c:
+        _do(c)
+
+
+def get_matches_for_session(session_id: str, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    def _do(c: sqlite3.Connection) -> list[dict]:
+        cur = c.execute(
+            "SELECT * FROM matches WHERE session_id = ? ORDER BY match_index",
+            (session_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    if conn is not None:
+        return _do(conn)
+    with db_session() as c:
+        return _do(c)
+
+
+def get_map_history(map_name: str, conn: Optional[sqlite3.Connection] = None) -> dict:
+    """Per-map lifetime stats. Useful once the player has 3+ matches on a map."""
+
+    def _do(c: sqlite3.Connection) -> dict:
+        cur = c.execute(
+            "SELECT result, COUNT(*) c, AVG(deaths) avg_deaths, AVG(ult_efficiency_score) avg_score "
+            "FROM matches WHERE map_name = ? GROUP BY result",
+            (map_name,),
+        )
+        rollup = {r["result"]: dict(r) for r in cur.fetchall()}
+        total = sum(r["c"] for r in rollup.values())
+        wins = rollup.get("win", {}).get("c", 0)
+        return {
+            "map_name": map_name,
+            "matches": total,
+            "wins": wins,
+            "winrate": wins / total if total else 0.0,
+            "by_result": rollup,
+        }
+
+    if conn is not None:
+        return _do(conn)
+    with db_session() as c:
+        return _do(c)
+
+
 def write_mistakes_from_events(
     session_id: str,
     events,
