@@ -437,23 +437,55 @@ def run_vod(video_path_or_url: str, title: Optional[str] = None) -> None:
 
 
 def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
-    """Spawn ui/overlay.py as a child process. We pipe JSON snapshots to its
-    stdin so it can run its own Tk loop without fighting rumps for the main
-    thread."""
+    """Spawn the pywebview overlay as a child process. stdin receives JSON
+    snapshots; stdout emits SNAP_CONTROL:* lines we forward to the worker."""
     import subprocess
     import sys as _sys
     try:
         proc = subprocess.Popen(
             [_sys.executable, "-m", "ui.overlay"],
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             cwd=str(config.BASE_DIR),
+            bufsize=1,
         )
         return proc
     except Exception:
         log.exception("Failed to launch overlay subprocess")
         return None
+
+
+def _start_overlay_control_reader(proc, stop_event, pause_flag) -> "threading.Thread":
+    """Read SNAP_CONTROL lines from the overlay subprocess and translate to
+    flag updates on the capture worker."""
+    import threading
+
+    def reader():
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                if not raw:
+                    break
+                line = raw.decode(errors="ignore").strip()
+                if not line.startswith("SNAP_CONTROL:"):
+                    continue
+                cmd = line.split(":", 1)[1].strip().upper()
+                if cmd == "STOP":
+                    log.info("Overlay requested STOP")
+                    stop_event.set()
+                    return
+                if cmd == "PAUSE":
+                    log.info("Overlay requested PAUSE")
+                    pause_flag["paused"] = True
+                if cmd == "RESUME":
+                    log.info("Overlay requested RESUME")
+                    pause_flag["paused"] = False
+        except Exception:
+            log.exception("Overlay control reader crashed")
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    return t
 
 
 def _capture_worker(
@@ -462,6 +494,7 @@ def _capture_worker(
     stop_event,  # threading.Event
     result: dict,
     overlay_proc=None,
+    pause_flag: Optional[dict] = None,  # {"paused": bool} shared with overlay reader
 ) -> None:
     """Background thread: runs the capture loop, publishes to LiveState, and
     stores final events / context in `result` for the main thread to consume
@@ -525,6 +558,12 @@ def _capture_worker(
                 break
             session_dir = sdir
             record = rec
+            # Honor pause command from overlay: keep the capture loop alive
+            # (so the elapsed clock still advances) but skip extraction work.
+            if pause_flag and pause_flag.get("paused"):
+                state.tick_frame()
+                push_overlay()
+                continue
             state.tick_frame()
             try:
                 tracker.ingest_frame(cf.frame, cf.timestamp)
@@ -671,11 +710,14 @@ def run_live(
     overlay_proc = _start_overlay_subprocess() if overlay else None
 
     stop_event = threading.Event()
+    pause_flag = {"paused": False}
+    if overlay_proc is not None:
+        _start_overlay_control_reader(overlay_proc, stop_event, pause_flag)
     result: dict = {"initial_hero": initial}
 
     worker = threading.Thread(
         target=_capture_worker,
-        args=(state, duration_seconds, stop_event, result, overlay_proc),
+        args=(state, duration_seconds, stop_event, result, overlay_proc, pause_flag),
         daemon=True,
     )
     worker.start()

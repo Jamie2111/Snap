@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Snap</title>
+<style>
+  :root {
+    --bg: rgba(14, 15, 18, 0.78);
+    --bg-solid: #0e0f12;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-hi: rgba(255, 255, 255, 0.14);
+    --text: rgba(255, 255, 255, 0.92);
+    --text-dim: rgba(255, 255, 255, 0.55);
+    --text-muted: rgba(255, 255, 255, 0.36);
+    --accent: #6b9aff;
+    --rec: #ff453a;
+    --warn: #ffb020;
+    --crit: #ff5e57;
+    --ok: #30d158;
+    --shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+    --radius: 14px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+    --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    font-family: var(--font);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  #app {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+    cursor: grab;
+  }
+
+  #app:active { cursor: grabbing; }
+
+  /* Title bar (drag handle + controls) */
+  .titlebar {
+    display: flex;
+    align-items: center;
+    padding: 10px 14px 6px 14px;
+    gap: 10px;
+    -webkit-app-region: drag;
+  }
+  .titlebar .indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--rec);
+    box-shadow: 0 0 0 0 rgba(255, 69, 58, 0.5);
+    animation: pulse 1.6s infinite;
+  }
+  .dot.paused { background: var(--warn); animation: none; }
+  .dot.idle   { background: var(--text-muted); animation: none; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(255, 69, 58, 0.55); }
+    70%  { box-shadow: 0 0 0 8px rgba(255, 69, 58, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 69, 58, 0); }
+  }
+  .rec-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--rec);
+    text-transform: uppercase;
+  }
+  .rec-label.paused { color: var(--warn); }
+  .rec-label.idle { color: var(--text-muted); }
+  .clock {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    margin-left: auto;
+  }
+
+  /* Control buttons */
+  .controls {
+    display: flex;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+  }
+  .btn {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-dim);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 120ms ease;
+    padding: 0;
+  }
+  .btn:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
+  .btn:active { transform: scale(0.94); }
+  .btn svg { width: 11px; height: 11px; }
+  .btn.stop:hover { background: rgba(255, 94, 87, 0.22); color: var(--crit); }
+
+  /* Body content */
+  .body {
+    padding: 6px 14px 14px 14px;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .state-chip {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .state-chip.dying { color: var(--crit); }
+  .state-chip.spawn { color: var(--warn); }
+  .state-chip.lobby { color: var(--accent); }
+  .state-chip.fight { color: var(--ok); }
+
+  .tip-text {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .tip-detail {
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--text-dim);
+  }
+
+  .context {
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    align-items: center;
+  }
+  .hero-badge {
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+
+  /* Compact / pill mode (FIGHT or PLAYING) */
+  body.mode-pill #app { backdrop-filter: blur(20px) saturate(160%); }
+  body.mode-pill .body { display: none; }
+  body.mode-pill .titlebar { padding: 7px 12px; }
+
+  /* Card mode (DYING, SPAWN) */
+  body.mode-card .body { display: flex; }
+  body.mode-card .context { display: none; }
+
+  /* Full mode (LOBBY) */
+  body.mode-full .body { display: flex; }
+  body.mode-full .context { display: flex; }
+
+  /* Smooth fade-in for tip changes */
+  .tip-text, .tip-detail {
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+  .fading-out { opacity: 0; transform: translateY(-2px); }
+
+  /* Hide controls on pill mode for max compactness */
+  body.mode-pill .controls .btn.stop { display: inline-flex; }
+  body.mode-pill .controls .btn.pause { display: inline-flex; }
+</style>
+</head>
+<body class="mode-pill">
+  <div id="app">
+    <div class="titlebar">
+      <div class="indicator">
+        <span class="dot" id="dot"></span>
+        <span class="rec-label" id="rec-label">REC</span>
+      </div>
+      <span class="clock" id="clock">0:00</span>
+      <div class="controls">
+        <button class="btn pause" id="btn-pause" title="Pause">
+          <svg viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="3" height="8" rx="0.5"/><rect x="7" y="2" width="3" height="8" rx="0.5"/></svg>
+        </button>
+        <button class="btn stop" id="btn-stop" title="Stop session">
+          <svg viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="2" width="8" height="8" rx="1"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="state-chip" id="state-chip">PLAYING</div>
+      <div class="tip-text" id="tip-text">—</div>
+      <div class="tip-detail" id="tip-detail"></div>
+      <div class="context" id="context">
+        <span class="hero-badge" id="hero">—</span>
+        <span id="vs"></span>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const dot = document.getElementById('dot');
+  const recLabel = document.getElementById('rec-label');
+  const clock = document.getElementById('clock');
+  const stateChip = document.getElementById('state-chip');
+  const tipText = document.getElementById('tip-text');
+  const tipDetail = document.getElementById('tip-detail');
+  const hero = document.getElementById('hero');
+  const vs = document.getElementById('vs');
+  const btnPause = document.getElementById('btn-pause');
+  const btnStop = document.getElementById('btn-stop');
+
+  let paused = false;
+  let lastTipKey = '';
+
+  function fmtClock(seconds) {
+    const s = Math.floor(seconds || 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h) return `${h}:${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+    return `${m}:${r.toString().padStart(2, '0')}`;
+  }
+
+  function setMode(state) {
+    let cls = 'mode-pill';
+    if (state === 'lobby') cls = 'mode-full';
+    else if (state === 'dying' || state === 'spawn') cls = 'mode-card';
+    else if (state === 'fight') cls = 'mode-pill';
+    else if (state === 'playing') cls = 'mode-pill';
+    if (document.body.className !== cls) document.body.className = cls;
+  }
+
+  function applySnap(snap) {
+    const recording = !!snap.recording;
+    if (paused) {
+      dot.className = 'dot paused';
+      recLabel.className = 'rec-label paused';
+      recLabel.textContent = 'PAUSED';
+    } else if (recording) {
+      dot.className = 'dot';
+      recLabel.className = 'rec-label';
+      recLabel.textContent = 'REC';
+    } else {
+      dot.className = 'dot idle';
+      recLabel.className = 'rec-label idle';
+      recLabel.textContent = 'IDLE';
+    }
+    clock.textContent = fmtClock(snap.elapsed_seconds);
+    const state = snap.player_state || 'playing';
+    setMode(state);
+    stateChip.className = 'state-chip ' + state;
+    stateChip.textContent = state;
+
+    const tipKey = `${snap.tip_text || ''}|${snap.tip_detail || ''}`;
+    if (tipKey !== lastTipKey) {
+      tipText.classList.add('fading-out');
+      tipDetail.classList.add('fading-out');
+      setTimeout(() => {
+        tipText.textContent = snap.tip_text || (state === 'lobby' ? 'Between matches' : '—');
+        tipDetail.textContent = snap.tip_detail || '';
+        tipText.classList.remove('fading-out');
+        tipDetail.classList.remove('fading-out');
+        lastTipKey = tipKey;
+      }, 140);
+    }
+
+    hero.textContent = snap.hero ? snap.hero.toUpperCase() : '';
+    const enemies = snap.enemies || [];
+    vs.textContent = enemies.length ? ('vs ' + enemies.slice(0, 3).join(', ').toUpperCase()) : '';
+  }
+
+  // Send control commands to the Python parent via stdout
+  function sendCommand(cmd) {
+    // pywebview can use window.pywebview.api; but for subprocess use a
+    // dedicated bridge that the launcher injects (or fall back to console.log
+    // which Python reads from stdout).
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.send_command) {
+      window.pywebview.api.send_command(cmd);
+    }
+    // Also emit a console.log line as a fallback channel
+    console.log('SNAP_CONTROL:' + cmd);
+  }
+
+  btnPause.addEventListener('click', () => {
+    paused = !paused;
+    sendCommand(paused ? 'PAUSE' : 'RESUME');
+    applySnap({ recording: !paused, elapsed_seconds: 0, player_state: stateChip.textContent.toLowerCase() });
+  });
+
+  btnStop.addEventListener('click', () => {
+    sendCommand('STOP');
+    btnStop.disabled = true;
+    btnStop.style.opacity = '0.4';
+  });
+
+  // Expose an API the Python side can call
+  window.snap_update = applySnap;
+
+  // Initial idle state
+  applySnap({ recording: true, elapsed_seconds: 0, player_state: 'playing', tip_text: '', tip_detail: '' });
+</script>
+</body>
+</html>
