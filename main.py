@@ -752,7 +752,27 @@ def run_live(
                 pass
 
     matches = result.get("matches") or []
-    if state.snapshot().frames_seen == 0:
+    frames_seen = state.snapshot().frames_seen
+    if frames_seen == 0:
+        # Still write a JSON sidecar so the launcher can show a useful error
+        # instead of timing out on its watcher.
+        import json as _json
+        import time as _time
+        err_payload = {
+            "session_id": "no_frames",
+            "completed_at": _time.time(),
+            "matches_count": 0,
+            "frames": 0,
+            "stopped_reason": "no_frames",
+            "error": "Zero frames captured. On macOS, grant Screen Recording permission "
+                     "to your Python executable in System Settings > Privacy & Security "
+                     "> Screen Recording, then restart the app.",
+            "feedback": None,
+        }
+        try:
+            (config.REPORTS_DIR / f"{int(_time.time())}-no_frames.json").write_text(_json.dumps(err_payload))
+        except Exception:
+            log.exception("Failed to write no-frames JSON sidecar")
         console.print(
             "[bold red]No frames captured.[/] "
             "If you're on macOS, grant Screen Recording permission in "

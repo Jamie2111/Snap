@@ -127,7 +127,7 @@ class Api:
             while proc.poll() is None:
                 _time.sleep(0.7)
             # Subprocess ended. Look for the newest report JSON written after spawn.
-            for _ in range(40):  # wait up to ~12s for the sidecar to land
+            for _ in range(40):
                 candidates = sorted(
                     (p for p in config.REPORTS_DIR.glob("*.json")
                      if p.stat().st_mtime >= spawned_at),
@@ -136,19 +136,22 @@ class Api:
                 if candidates:
                     try:
                         payload = json.loads(candidates[0].read_text())
-                        Api._jobs[job_id]["result"] = payload.get("feedback", payload)
-                        Api._jobs[job_id]["status"] = "done"
-                        return
                     except Exception as e:
                         Api._jobs[job_id]["status"] = "error"
                         Api._jobs[job_id]["error"] = f"Could not parse report: {e}"
                         return
+                    # Detect the zero-frames diagnostic and surface it cleanly.
+                    if payload.get("stopped_reason") == "no_frames" or payload.get("frames") == 0:
+                        Api._jobs[job_id]["status"] = "error"
+                        Api._jobs[job_id]["error"] = "no_frames"
+                        Api._jobs[job_id]["error_payload"] = payload
+                        return
+                    Api._jobs[job_id]["result"] = payload.get("feedback", payload)
+                    Api._jobs[job_id]["status"] = "done"
+                    return
                 _time.sleep(0.3)
             Api._jobs[job_id]["status"] = "error"
-            Api._jobs[job_id]["error"] = (
-                "Live capture ended but no report JSON was produced. "
-                "Common cause: zero frames captured (Screen Recording permission)."
-            )
+            Api._jobs[job_id]["error"] = "no_report"
 
         threading.Thread(target=watcher, daemon=True).start()
         return {"job_id": job_id}
@@ -562,6 +565,16 @@ class Api:
     def open_db(self) -> None:
         try:
             subprocess.run(["open", str(config.PROFILES_DIR)])
+        except Exception:
+            pass
+
+    def open_screen_recording_settings(self) -> None:
+        """Open macOS Screen Recording privacy pane directly."""
+        try:
+            subprocess.run([
+                "open",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            ])
         except Exception:
             pass
 

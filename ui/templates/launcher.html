@@ -666,7 +666,31 @@
           renderReport(res.result);
         }
       } else if (res.status === 'error') {
-        out.innerHTML = `<div class="empty">Error: ${res.error || 'unknown'}</div>`;
+        // Friendly screen for the zero-frames Screen-Recording-permission case.
+        if (res.error === 'no_frames' || res.error === 'no_report') {
+          out.innerHTML = `
+            <div style="max-width:520px;margin:60px auto;text-align:center;">
+              <div style="font-size:48px;margin-bottom:8px;">🎬</div>
+              <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;margin-bottom:8px;">
+                Snap couldn't capture any frames
+              </div>
+              <div style="color:var(--text-dim);font-size:13px;line-height:1.55;margin-bottom:20px;">
+                macOS requires Screen Recording permission for whichever Python is
+                running Snap. Open the system settings, allow your terminal /
+                Python, then fully <strong>quit and re-open Snap</strong>
+                (the permission only takes effect on a fresh launch).
+              </div>
+              <button class="btn primary" id="open-screen-perms">Open Screen Recording settings</button>
+              <button class="btn" id="retry-live" style="margin-left:8px;">Back</button>
+            </div>
+          `;
+          $('open-screen-perms').addEventListener('click', () => {
+            window.pywebview.api.open_screen_recording_settings();
+          });
+          $('retry-live').addEventListener('click', back);
+          return;
+        }
+        out.innerHTML = `<div class="empty">Error: ${escapeHtml(res.error || 'unknown')}</div>`;
       } else {
         out.innerHTML = `<div class="empty">Job not found.</div>`;
       }
