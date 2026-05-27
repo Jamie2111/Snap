@@ -88,6 +88,17 @@ class MatchSummary:
 
 
 @dataclass
+class StatItem:
+    """One measured hero-specific stat for the Stats panel."""
+    label: str
+    value: float
+    unit: str
+    benchmark: Optional[float]
+    delta_pct: Optional[float]
+    status: str  # above | on_target | below | unknown
+
+
+@dataclass
 class Feedback:
     session_summary: SessionSummary
     critical: list[CriticalFeedback] = field(default_factory=list)
@@ -95,6 +106,7 @@ class Feedback:
     insight: list[InsightItem] = field(default_factory=list)
     coach_said: list[CoachQuote] = field(default_factory=list)
     mechanics: list[MechanicsItem] = field(default_factory=list)
+    stats: list[StatItem] = field(default_factory=list)
     one_thing_to_focus_on: str = ""
     progress_acknowledgment: str = ""
     match_context: Optional[MatchContext] = None
@@ -436,6 +448,21 @@ def _mechanics(events: SessionEvents) -> list[MechanicsItem]:
     return out
 
 
+def _stats_to_items(match_stats) -> list[StatItem]:
+    """Convert MatchStats to a list of StatItems for the UI."""
+    return [
+        StatItem(
+            label=sl.label,
+            value=sl.value,
+            unit=sl.unit,
+            benchmark=sl.benchmark,
+            delta_pct=sl.delta_pct,
+            status=sl.status,
+        )
+        for sl in match_stats.stats
+    ]
+
+
 def generate_for_matches(
     matches: list,
     db_conn: Optional[sqlite3.Connection] = None,
@@ -444,12 +471,17 @@ def generate_for_matches(
     an aggregated session-overview Feedback that contains MatchSummary cards
     for the UI to render."""
 
+    from extractor.match_stats import aggregate as aggregate_stats, compute_stats
     from extractor.match_tracker import Match, aggregate_session_stats
 
     per_match: list[Feedback] = []
+    per_match_stats = []
     summaries: list[MatchSummary] = []
     for m in matches:
         fb = generate(m.events, m.match_context, db_conn=db_conn)
+        ms = compute_stats(m.match_context.your_hero, m.events, m.duration_seconds)
+        per_match_stats.append(ms)
+        fb.stats = _stats_to_items(ms)
         per_match.append(fb)
         aim_pct = (
             fb.session_summary.ult_efficiency_score  # placeholder if no aim data
@@ -481,6 +513,21 @@ def generate_for_matches(
     session_fb = generate(agg_events, recent_ctx, db_conn=db_conn)
     session_fb.matches = per_match
     session_fb.match_summaries = summaries
+    if per_match_stats:
+        session_fb.stats = _stats_to_items(aggregate_stats(per_match_stats))
+        # Emit a critical for any stat that's significantly below benchmark.
+        below = [s for s in session_fb.stats if s.status == "below" and s.benchmark is not None]
+        for st in below[:2]:
+            session_fb.critical.append(CriticalFeedback(
+                issue=f"{st.label}: {st.value}{st.unit} (target {st.benchmark}{st.unit})",
+                timestamp=0.0,
+                context=f"Below {st.tier if hasattr(st, 'tier') else 'diamond'} benchmark by "
+                        f"{abs(int(st.delta_pct or 0))} percent.",
+                historical_context="",
+                recurrence=1,
+                principle="Hero kit throughput is a leading indicator. Heroes that under-use their kit under-perform.",
+                next_step=f"Track this stat next session and aim to close the gap by 5 to 10 percent.",
+            ))
     return session_fb
 
 

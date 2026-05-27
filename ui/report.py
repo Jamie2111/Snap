@@ -87,6 +87,23 @@ def _insight_panel(fb: Feedback) -> Optional[Panel]:
     return Panel("\n\n".join(blocks), title="Insight", border_style="magenta", box=ROUNDED)
 
 
+def _stats_panel(fb: Feedback) -> Optional[Panel]:
+    if not fb.stats:
+        return None
+    lines: list[str] = []
+    for s in fb.stats:
+        bench_str = ""
+        if s.benchmark is not None:
+            bench_str = f"  [dim]target {s.benchmark:g}{s.unit}[/]"
+        delta_str = ""
+        if s.delta_pct is not None:
+            sign = "+" if s.delta_pct >= 0 else ""
+            color = {"above": "green", "below": "red", "on_target": "yellow"}.get(s.status, "dim")
+            delta_str = f"  [{color}]{sign}{s.delta_pct:.0f}%[/]"
+        lines.append(f"[bold]{s.label}:[/] {s.value:g}{s.unit}{bench_str}{delta_str}")
+    return Panel("\n".join(lines), title="Stats", border_style="cyan", box=ROUNDED)
+
+
 def _mechanics_panel(fb: Feedback) -> Optional[Panel]:
     if not fb.mechanics:
         return None
@@ -202,6 +219,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
         _critical_panel(fb),
         _improvement_panel(fb),
         _insight_panel(fb),
+        _stats_panel(fb),
         _mechanics_panel(fb),
         _coach_panel(fb),
         _focus_panel(fb),
