@@ -87,6 +87,32 @@ def _insight_panel(fb: Feedback) -> Optional[Panel]:
     return Panel("\n\n".join(blocks), title="Insight", border_style="magenta", box=ROUNDED)
 
 
+def _matchups_panel(fb: Feedback) -> Optional[Panel]:
+    if not fb.matchups:
+        return None
+    sections = {"weakness": [], "strength": [], "neutral": []}
+    for m in fb.matchups:
+        sections[m.side].append(m)
+    lines: list[str] = []
+    if sections["weakness"]:
+        lines.append("[red bold]WEAKNESSES[/]")
+        for m in sections["weakness"]:
+            tip = (m.advice[0] if m.advice else m.key_threat)
+            lines.append(f"  ● [bold]{m.enemy.title()}[/] ({m.difficulty})  [dim]{tip}[/]")
+    if sections["strength"]:
+        lines.append("")
+        lines.append("[green bold]STRENGTHS[/]")
+        for m in sections["strength"]:
+            tip = (m.advice[0] if m.advice else m.key_threat)
+            lines.append(f"  ● [bold]{m.enemy.title()}[/]  [dim]{tip}[/]")
+    if sections["neutral"]:
+        lines.append("")
+        lines.append("[yellow bold]NEUTRAL[/]")
+        for m in sections["neutral"]:
+            lines.append(f"  ● {m.enemy.title()}")
+    return Panel("\n".join(lines), title="Matchups", border_style="magenta", box=ROUNDED)
+
+
 def _stats_panel(fb: Feedback) -> Optional[Panel]:
     if not fb.stats:
         return None
@@ -219,6 +245,7 @@ def render(fb: Feedback, console: Optional[Console] = None) -> None:
         _critical_panel(fb),
         _improvement_panel(fb),
         _insight_panel(fb),
+        _matchups_panel(fb),
         _stats_panel(fb),
         _mechanics_panel(fb),
         _coach_panel(fb),

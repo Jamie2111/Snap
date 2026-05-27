@@ -88,6 +88,15 @@ class MatchSummary:
 
 
 @dataclass
+class MatchupAdvice:
+    enemy: str
+    difficulty: str
+    key_threat: str
+    advice: list[str]
+    side: str  # "weakness" | "strength" | "neutral"
+
+
+@dataclass
 class StatItem:
     """One measured hero-specific stat for the Stats panel."""
     label: str
@@ -107,6 +116,7 @@ class Feedback:
     coach_said: list[CoachQuote] = field(default_factory=list)
     mechanics: list[MechanicsItem] = field(default_factory=list)
     stats: list[StatItem] = field(default_factory=list)
+    matchups: list[MatchupAdvice] = field(default_factory=list)
     one_thing_to_focus_on: str = ""
     progress_acknowledgment: str = ""
     match_context: Optional[MatchContext] = None
@@ -397,6 +407,7 @@ def generate(
     insights = _insights(events, match, history)
     coach_said = _coach_quotes(match.your_hero, mistake_types, db_conn)
     mechanics = _mechanics(events)
+    matchups = _matchups(match)
     focus = _pick_focus(linted, improvements)
     progress = _progress_ack(history, events)
 
@@ -407,10 +418,26 @@ def generate(
         insight=insights,
         coach_said=coach_said,
         mechanics=mechanics,
+        matchups=matchups,
         one_thing_to_focus_on=focus,
         progress_acknowledgment=progress,
         match_context=match,
     )
+
+
+def _matchups(match_ctx) -> list[MatchupAdvice]:
+    from feedback.matchup_briefing import analyze
+    if not match_ctx or not match_ctx.your_hero or not match_ctx.enemies:
+        return []
+    briefing = analyze(match_ctx.your_hero, list(match_ctx.enemies))
+    out: list[MatchupAdvice] = []
+    for line in briefing.weaknesses + briefing.neutral + briefing.strengths:
+        side = "weakness" if line.is_weakness else ("strength" if line.is_strength else "neutral")
+        out.append(MatchupAdvice(
+            enemy=line.enemy, difficulty=line.difficulty,
+            key_threat=line.key_threat, advice=list(line.advice), side=side,
+        ))
+    return out
 
 
 def _mechanics(events: SessionEvents) -> list[MechanicsItem]:

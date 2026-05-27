@@ -100,20 +100,63 @@ class Api:
 
     # ============ Background ops ============
 
-    def run_live(self, hero: str = "") -> None:
-        """Live capture is special: it spawns a subprocess so the overlay
-        can live in its own window across all Spaces. The launcher does
-        not lock up waiting for it."""
+    def run_live(self, hero: str = "") -> dict:
+        """Live capture spawns a subprocess (overlay needs its own window
+        across all Spaces) AND registers a background poller that detects
+        when the subprocess exits + the report JSON appears, then signals
+        the launcher to auto-navigate to the report view."""
+
         cwd = config.BASE_DIR
         args = [_python_exec(), str(cwd / "main.py"), "--live"]
         h = (hero or "").strip().lower().replace(" ", "")
         if h:
             args.extend(["--hero", h])
+        spawned_at = self._now()
         try:
             proc = subprocess.Popen(args, cwd=str(cwd))
             self._active_subprocs.append(proc)
-        except Exception:
+        except Exception as e:
             log.exception("Failed to launch live capture")
+            return {"error": str(e)}
+
+        job_id = uuid.uuid4().hex[:12]
+        Api._jobs[job_id] = {"status": "running", "result": None, "error": None, "mode": "live"}
+
+        def watcher():
+            import time as _time
+            while proc.poll() is None:
+                _time.sleep(0.7)
+            # Subprocess ended. Look for the newest report JSON written after spawn.
+            for _ in range(40):  # wait up to ~12s for the sidecar to land
+                candidates = sorted(
+                    (p for p in config.REPORTS_DIR.glob("*.json")
+                     if p.stat().st_mtime >= spawned_at),
+                    key=lambda p: p.stat().st_mtime, reverse=True,
+                )
+                if candidates:
+                    try:
+                        payload = json.loads(candidates[0].read_text())
+                        Api._jobs[job_id]["result"] = payload.get("feedback", payload)
+                        Api._jobs[job_id]["status"] = "done"
+                        return
+                    except Exception as e:
+                        Api._jobs[job_id]["status"] = "error"
+                        Api._jobs[job_id]["error"] = f"Could not parse report: {e}"
+                        return
+                _time.sleep(0.3)
+            Api._jobs[job_id]["status"] = "error"
+            Api._jobs[job_id]["error"] = (
+                "Live capture ended but no report JSON was produced. "
+                "Common cause: zero frames captured (Screen Recording permission)."
+            )
+
+        threading.Thread(target=watcher, daemon=True).start()
+        return {"job_id": job_id}
+
+    @staticmethod
+    def _now() -> float:
+        import time as _time
+        return _time.time()
 
     def run_video(self, path: str, hero: str = "") -> dict:
         """Run --video as a background thread inside the launcher process,

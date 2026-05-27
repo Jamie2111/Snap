@@ -68,6 +68,10 @@ def run_overlay() -> None:
         return
 
     api = _OverlayApi()
+    # NOTE: we intentionally do NOT use transparent=True here. On macOS that
+    # combination with frameless can leave the window invisible if anything
+    # in the HTML load fails. Instead the window is opaque-dark and the
+    # CSS body paints the glass effect on top. Much more reliable.
     window = webview.create_window(
         title="Snap",
         url=_html_url(),
@@ -77,10 +81,9 @@ def run_overlay() -> None:
         y=24,
         frameless=True,
         easy_drag=True,
-        transparent=True,
         on_top=True,
         js_api=api,
-        background_color="#00000000",
+        background_color="#0b0b0d",
     )
 
     def stdin_reader() -> None:

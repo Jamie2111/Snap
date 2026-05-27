@@ -438,18 +438,25 @@ def run_vod(video_path_or_url: str, title: Optional[str] = None) -> None:
 
 def _start_overlay_subprocess() -> Optional["subprocess.Popen"]:
     """Spawn the pywebview overlay as a child process. stdin receives JSON
-    snapshots; stdout emits SNAP_CONTROL:* lines we forward to the worker."""
+    snapshots; stdout emits SNAP_CONTROL:* lines we forward to the worker.
+
+    stderr is written to data/sessions/.overlay.log so silent failures are
+    debuggable. We also log immediately if Popen fails."""
     import subprocess
     import sys as _sys
+    log_path = config.SESSIONS_DIR / ".overlay.log"
     try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_f = log_path.open("ab")
         proc = subprocess.Popen(
             [_sys.executable, "-m", "ui.overlay"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_f,
             cwd=str(config.BASE_DIR),
             bufsize=1,
         )
+        log.info("Overlay subprocess spawned (pid=%s, log=%s)", proc.pid, log_path)
         return proc
     except Exception:
         log.exception("Failed to launch overlay subprocess")
@@ -669,7 +676,7 @@ def _capture_worker(
 def run_live(
     duration_seconds: Optional[int] = None,
     initial_hero: Optional[str] = None,
-    menubar: bool = True,
+    menubar: bool = False,
     overlay: bool = True,
 ) -> None:
     import threading
@@ -809,6 +816,27 @@ def run_live(
     player_profile.update_player_model(session_id, conn=conn)
     render(feedback, console=console)
     md_path = write_markdown(feedback, session_id)
+    # Sidecar JSON so the launcher can pick up the structured feedback after
+    # the subprocess exits and auto-navigate to the report view.
+    import json as _json
+    from dataclasses import asdict as _asdict, is_dataclass as _is_dc
+
+    def _safe(o):
+        if _is_dc(o): return {k: _safe(v) for k, v in _asdict(o).items()}
+        if isinstance(o, dict): return {k: _safe(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)): return [_safe(x) for x in o]
+        if isinstance(o, (str, int, float, bool)) or o is None: return o
+        return str(o)
+
+    json_path = md_path.with_suffix(".json")
+    json_path.write_text(_json.dumps({
+        "session_id": session_id,
+        "completed_at": time.time(),
+        "matches_count": len(matches),
+        "frames": state.snapshot().frames_seen,
+        "stopped_reason": result.get("stopped_reason"),
+        "feedback": _safe(feedback),
+    }, indent=2))
     console.print(
         f"\n[dim]Processed {state.snapshot().frames_seen} frames across {len(matches)} match(es) "
         f"({result.get('stopped_reason')}). Markdown report: {md_path}[/]"

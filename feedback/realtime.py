@@ -78,25 +78,32 @@ def tip_for_spawn(
     enemies: list[str],
     last_death=None,
 ) -> Optional[RealtimeTip]:
-    """In spawn room, about to walk out: what to fix this life."""
-    if last_death is not None:
-        # Continue the previous death's lesson into spawn
-        if last_death.ult_pct_at_death >= 0.80:
-            return RealtimeTip(
-                state=PlayerState.SPAWN,
-                text="Use ult earlier this life.",
-                detail="If charge is >80%, throw it the next engage.",
-            )
-    if hero and enemies:
-        # Highlight any hard counters before the player even walks out
-        hard = [e for e in enemies if MATCHUPS.get(hero, {}).get(e, {}).get("difficulty") in ("very_hard", "hard")]
-        if hard:
-            return RealtimeTip(
-                state=PlayerState.SPAWN,
-                text=f"Hard matchup: {hard[0]}",
-                detail=MATCHUPS.get(hero, {}).get(hard[0], {}).get("advice", [""])[0],
-                urgency="warn",
-            )
+    """In spawn room, about to walk out: what to fix this life.
+
+    Priority: previous-death lesson > hard-counter advice > hero win condition."""
+    from feedback.matchup_briefing import analyze
+
+    if last_death is not None and last_death.ult_pct_at_death >= 0.80:
+        return RealtimeTip(
+            state=PlayerState.SPAWN,
+            text="Use ult earlier this life.",
+            detail="If charge is >80%, throw it the next engage.",
+        )
+
+    briefing = analyze(hero, enemies)
+    if briefing.priority and briefing.priority.is_weakness:
+        return RealtimeTip(
+            state=PlayerState.SPAWN,
+            text=f"Hard matchup: {briefing.priority.enemy.title()}",
+            detail=briefing.detail or briefing.priority.key_threat,
+            urgency="warn",
+        )
+    if briefing.priority and briefing.priority.is_strength:
+        return RealtimeTip(
+            state=PlayerState.SPAWN,
+            text=f"Target: {briefing.priority.enemy.title()}",
+            detail=briefing.detail or "Favorable matchup. Make space for your team here.",
+        )
     if hero and hero in HERO_COACHING:
         wc = HERO_COACHING[hero].get("win_condition", "")
         if wc:
@@ -104,8 +111,23 @@ def tip_for_spawn(
     return None
 
 
-def tip_for_lobby(last_match_focus: Optional[str]) -> Optional[RealtimeTip]:
-    """Between matches: surface the last match's focus next-game advice."""
+def tip_for_lobby(
+    last_match_focus: Optional[str],
+    hero: Optional[str] = None,
+    enemies: Optional[list[str]] = None,
+) -> Optional[RealtimeTip]:
+    """Between matches: surface the matchup briefing for the next match if we
+    have enemy data, else the last match's focus."""
+    from feedback.matchup_briefing import analyze
+
+    briefing = analyze(hero, enemies or [])
+    if briefing.has_data:
+        return RealtimeTip(
+            state=PlayerState.LOBBY,
+            text=briefing.headline or "Matchup briefing",
+            detail=briefing.detail or "",
+            urgency="warn" if briefing.weaknesses else "info",
+        )
     if last_match_focus:
         return RealtimeTip(
             state=PlayerState.LOBBY,
@@ -130,5 +152,5 @@ def generate(
     if state == PlayerState.SPAWN:
         return tip_for_spawn(hero, enemies, last_death)
     if state == PlayerState.LOBBY:
-        return tip_for_lobby(last_match_focus)
+        return tip_for_lobby(last_match_focus, hero=hero, enemies=enemies)
     return None  # PLAYING: silent

@@ -593,8 +593,26 @@
   $('live-start').addEventListener('click', async () => {
     const hero = $('live-hero').value.trim();
     closeDialog('dlg-live');
-    await window.pywebview.api.run_live(hero);
-    toast(hero ? `Live capture started on ${hero}. See the overlay.` : 'Live capture started. See the overlay.');
+    navigate('job', { title: 'Live capture', subtitle: 'in session' });
+    $('job-content').innerHTML = `
+      <div style="text-align:center;padding:40px 20px;">
+        <div style="font-size:28px;font-weight:700;margin-bottom:6px;">Recording${hero ? ' on ' + escapeHtml(hero) : ''}</div>
+        <div style="color:var(--text-dim);font-size:13px;margin-bottom:24px;">
+          The glass overlay should appear in the top-left of your screen.<br>
+          Use the overlay's <strong>stop</strong> button when you're done, and Snap will
+          automatically show the analyzed report here.
+        </div>
+        <div style="color:var(--text-muted);font-family:var(--font-mono);font-size:11px;">
+          <span class="spinner"></span> waiting for capture to end...
+        </div>
+      </div>
+    `;
+    const job = await window.pywebview.api.run_live(hero);
+    if (!job || job.error) {
+      $('job-content').innerHTML = `<div class="empty">Failed to start live capture: ${(job && job.error) || 'unknown error'}</div>`;
+      return;
+    }
+    pollJob(job.job_id, 'live');
   });
 
   $('video-start').addEventListener('click', async () => {
@@ -792,6 +810,7 @@
     html += renderTier(fb.critical, 'critical', 'Critical', renderCritical);
     html += renderTier(fb.improvement, 'improvement', 'Improvement', renderImprovement);
     html += renderTier(fb.insight, 'insight', 'Insight', renderInsight);
+    html += renderMatchups(fb.matchups);
     html += renderStats(fb.stats);
     html += renderTier(fb.mechanics, 'mechanics', 'Mechanics', renderMechanic);
     html += renderTier(fb.coach_said, 'coach', 'Coach said', renderCoach);
@@ -850,6 +869,37 @@
   function renderCoach(q) {
     const ts = q.timestamp ? `${Math.floor(q.timestamp/60)}:${(Math.floor(q.timestamp%60)).toString().padStart(2,'0')}` : '';
     return `<div class="lead">"${escapeHtml(q.text || '')}"</div><div class="meta">${escapeHtml(q.source || '')} ${ts ? '· ' + ts : ''} ${q.relevance ? '· ' + escapeHtml(q.relevance) : ''}</div>`;
+  }
+
+  function renderMatchups(matchups) {
+    if (!matchups || !matchups.length) return '';
+    const weaknesses = matchups.filter(m => m.side === 'weakness');
+    const strengths  = matchups.filter(m => m.side === 'strength');
+    const neutral    = matchups.filter(m => m.side === 'neutral');
+
+    let html = `<div class="panel insight"><div class="panel-title" style="color:var(--insight);">Matchups</div>`;
+
+    if (weaknesses.length) {
+      html += `<div style="font-family:var(--font-mono);font-size:10px;color:var(--crit);letter-spacing:0.1em;margin:6px 0 8px 0;font-weight:700;">WEAKNESSES</div>`;
+      for (const m of weaknesses) {
+        const tip = (m.advice && m.advice[0]) || m.key_threat;
+        html += `<div class="panel-item"><div class="lead">${escapeHtml(m.enemy)} <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);font-weight:400;">(${m.difficulty})</span></div><div class="body">${escapeHtml(tip)}</div></div>`;
+      }
+    }
+    if (strengths.length) {
+      html += `<div style="font-family:var(--font-mono);font-size:10px;color:var(--ok);letter-spacing:0.1em;margin:14px 0 8px 0;font-weight:700;">STRENGTHS</div>`;
+      for (const m of strengths) {
+        const tip = (m.advice && m.advice[0]) || m.key_threat;
+        html += `<div class="panel-item"><div class="lead">${escapeHtml(m.enemy)}</div><div class="body">${escapeHtml(tip)}</div></div>`;
+      }
+    }
+    if (neutral.length) {
+      html += `<div style="font-family:var(--font-mono);font-size:10px;color:var(--warn);letter-spacing:0.1em;margin:14px 0 8px 0;font-weight:700;">NEUTRAL</div>`;
+      const names = neutral.map(m => m.enemy.charAt(0).toUpperCase() + m.enemy.slice(1)).join(', ');
+      html += `<div class="panel-item"><div class="body">${escapeHtml(names)}</div></div>`;
+    }
+    html += `</div>`;
+    return html;
   }
 
   function renderStats(stats) {
